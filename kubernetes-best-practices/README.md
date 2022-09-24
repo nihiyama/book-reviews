@@ -20,9 +20,9 @@
   - ステートのすべての運用要件（バックアップ、データの局所性、冗長性など）や、Kubernetesクラスタにステートがあるとクラスタ間でアプリケーションを移動するのが難しくなるという事実を考慮すると、ほとんどの場合、ストレージSaaSは価格プレミアムに値することは明らか
 - 多くのチームにとって最初の失敗モードは、単にファイルをあるクラスタから別のクラスタにコピーしてしまうこと。単一の frontend/ ディレクトリを持つ代わりに、frontend-production/ と frontend-development/ というディレクトリのペアを持つようにする。
 - その結果、ほとんどの人はテンプレート・システムを使う->Helm
-- ほとんどのサービスは、デプロイメントリソースとしてデプロイされるべき
+- ほとんどのサービスは、Deploymentリソースとしてデプロイされるべき
   - 冗長性と拡張性のために同一のレプリカを作成
-- デプロイメントを公開するには、ロードバランサとなるサービスを利用
+- Deploymentを公開するには、ロードバランサとなるサービスを利用
 
 ## Chapter 2. Developer Workflows
 
@@ -359,17 +359,736 @@
   - Helmを使用してアプリケーションをデプロイしている場合、デフォルトのサービスアカウントはTillerで、kube-systemにデプロイさる。Tillerを各namespaceにデプロイする場合は、そのnamespaceにスコープされたTiller専用のサービスアカウントを用意した方がよい。Helmのインストール/アップグレードコマンドを呼び出すCI/CDツールでは、プレステップで、サービスアカウントとデプロイのための特定のnamespaceでHelmクライアントを初期化する。サービスアカウント名は各ネームスペースで同じにすることができるが、namespaceは特定のものである必要があります。本書の発行時点で、Helm v3はアルファ版であり、その基本原則の1つは、Tillerはもはや存在しないことを呼びかけておくことが重要。
   - Secrets APIでウォッチとリストを必要とするアプリケーションを制限する。これは基本的に、アプリケーションまたはポッドをデプロイした人がそのnamespace内のシークレットを閲覧できるようにする。もしアプリケーションが特定のシークレットのために Secrets API にアクセスする必要がある場合は、アプリケーションが直接割り当てられたシークレット以外の、読み取る必要のある特定のシークレットの get を使用するよう制限する。
 
-
 ## Chapter 5. Continuous Integration, Testing, and Deployment
 
+- CI/CDの目標は、開発者がコードをチェックインしてから、新しいコードを本番環境にロールアウトするまで、完全に自動化されたプロセスを持つこと
+- Kubernetesにデプロイされたアプリの更新を手動でロールアウトすることは、非常にエラーが発生しやすいので避けたい
+- 重要なトピック
+  - バージョン管理
+    - すべてのCI/CDパイプラインは、アプリケーションと構成のコード変更の実行履歴を維持するバージョン管理から始まる
+    - ブランチ戦略を立てるにはさまざまな方法があるが、組織構造や職務の分担を考えてね
+    - アプリケーションコードとKubernetesマニフェストやHelmチャートなどの設定コードの両方を含めることで、コミュニケーションとコラボレーションという優れたDevOpsの原則を促進することができる
+    - アプリケーション開発者と運用エンジニアの両方が単一のリポジトリでコラボレーションすることで、アプリケーションを本番に提供するチームへの信頼が高まる
+  - CI (Continuous Integration)
+    - 大きな変更をあまり頻繁にコミットしない代わりに、小さな変更をより頻繁にコミットする
+    - コード変更がリポジトリにコミットされるたびに、ビルドが開始される。これにより、実際に問題が発生した場合に、何がアプリケーションを壊してしまったのかについて、より迅速なフィードバックループを持つことができるようになる
+    - なぜ、アプリケーションがどのようにビルドされているかを知る必要があるのか、それはアプリケーション開発者の役割ではないのか？従来はそうだったかもしれないが、企業がDevOps文化を受け入れる方向に進むにつれて、運用チームはアプリケーションコードやソフトウェア開発のワークフローに近づくようになった
+  - テスト
+    - パイプラインでテストを実行する目的は、ビルドを破壊するコード変更に対するフィードバックループを迅速に提供すること
+    - コードベースに対して失敗するテストがある場合、コンテナイメージをビルドしてレジストリにプッシュすることは避けたい
+    - インフラストラクチャやアプリケーションの本番環境への配信を自動化するようになると、コードベースのすべての部分に対して自動テストを実行することを考える必要がある
+      - つまりyamlに対してもテストする
+  - イメージのタグ付け
+    - まず、小さいイメージを作る必要がある（これはセキュリティの観点からも良い）
+      - multistage build
+        - アプリケーションの実行に必要ない依存関係を削除することができる
+        - golangだとbuildしたバイナリだけあれば良くて、ソースコードは必要ない
+      - distroless base image
+        - イメージから不要なバイナリやシェルをすべて削除したもの
+        - シェルがないため、イメージにデバッガをアタッチできないのが難点
+      - optimized base image
+        - OS 層から不要なものを取り除き、スリム化することに重点を置いたimage
+        - slim系のイメージとかかな
+        - 割と最適解だったりする
+        - とはいえ最終的にdistrolessイメージにできるといいね
+    - タグづけ
+      - latestタグを使うな
+      - 代表的な戦略は以下の通り
+        - BuildID
+          - CIがキックされる時のID
+        - Build System-BuildID
+          - 複数のビルドシステムを持っているユーザー向け
+        - Git Hash
+          - コードがコミットされた時のhash値
+          - タグづけビルドもこれにあたるかな？
+        - githash-buildID
+          - git hashとbuildidの両方を使うやり方
+  - CD (Continuous Deployment)
+    - CDは、CIパイプラインを正常に通過した変更を、人手を介さずに本番環境にデプロイするプロセス
+    - KubernetesはDeploymentオブジェクトを宣言的に記述し、一貫した方法でバージョン管理、デプロイを行うことができる
+    - しっかりとしたCIパイプラインをセットアップする必要はあるよ
+  - デプロイメント戦略
+    - ローリングアップデート
+      - ロールアウト中に更新されるレプリカの最大量と利用できないポッドの最大量を設定することができる
+
+        ```yaml
+        kind: Deployment
+        apiVersion: v1
+        metadata:
+          name: frontend
+        spec:
+          replicas: 3
+          template:
+            spec:
+              containers:
+                - name: frontend
+                  image: brendanburns/frontend:v1
+          strategy:
+              type: RollingUpdate
+              rollingUpdate:
+              maxSurge: 1 # Maximum amount of replicas to update at one time
+              maxUnavailable: 1 # Maximum amount of replicas unavailable during rollout
+        ```
+
+      - この戦略を使うと、接続が切断される可能性があるので注意が必要→readiness probeとpreStop lifecycle hookの利用が効果的
+
+        ```yaml
+        kind: Deployment
+          apiVersion: v1
+          metadata:
+          name: frontend
+          spec:
+            replicas: 3
+            template:
+              spec:
+                containers:
+                - name: frontend
+                  image: brendanburns/frontend:v1
+                livenessProbe:
+                  # ...
+                readinessProbe:
+                  httpGet:
+                    path: /readiness # probe endpoint
+                    port: 8888
+                lifecycle:
+                  preStop:
+                    exec:
+                      command: ["/usr/sbin/nginx","-s","quit"]
+          strategy:
+            # ...
+        ```
+
+        - readiness probeは、デプロイされた新バージョンがトラフィックを受け入れる準備ができているか確認するもの
+        - preStopフックは現在デプロイされているアプリケーションでコネクションが枯渇していることを確認することができる
+        - ライフサイクルフックはコンテナが終了する前に呼び出され、同期的に実行されるため、最終的な終了シグナルが与えられる前に完了する
+        - preStopライフサイクルフックは NGINX をgracefulに終了させるが、SIGTERM はgracefulでない、素早い終了を実施します
+      - ローリングアップデートのもう一つの懸念は、ロールオーバー中に2つのバージョンのアプリケーションを同時に実行されること
+        - データベーススキーマは、両方のバージョンのアプリケーションをサポートする必要がある
+          - バージョンアップではスキーマ変更は常に追加する形がいい（削除は次の次のバージョンくらいで行う）
+      - readiness probeとliveness probeを用意する
+        - readiness probe: エンドポイントとしてサービスの背後に置く前に、アプリケーションがトラフィックに対応する準備ができていることを確認する
+        - liveness probe: アプリケーションが健全に動作していることを確認し、そのlivenessプローブに失敗した場合にポッドを再起動させる
+    - Blue/Green デプロイメント
+      - 予測可能な方法でアプリケーションをリリースすることができる
+      - トラフィックが新しい環境に移行するタイミングを制御できるため、アプリケーションの新バージョンのロールアウトをかなり制御できるようになる
+      - 以前のバージョンのアプリケーションに簡単に切り替えることができる
+      - 考慮しなければならないことはいくつかある
+        - インフライトトランザクション（実行中のトランザクション）とスキーマ更新の互換性を考慮する必要があるため、データベースのマイグレーションが困難になる
+        - 両方の環境を誤って削除してしまう危険性がある
+        - 両方の環境に対して余分な容量が必要=コスト
+        - レガシーアプリがデプロイメントを処理できないハイブリッドデプロイメントでは、調整の問題がある
+    - カナリアリリース
+      - Blue/Green デプロイメントに似ているが、詳細にトラフィックを制御できる
+      - 一部のユーザーのみに新しいのを利用させるというのもできる
+      - デプロイの失敗や機能の破損のリスクを、より少数のユーザーに対して低減することができる
+      - 問題なければ徐々にトラフィックを徐々に新の方に増やすというやり方ができる(SRE本ではイクスポーネンシャルの関数でやると大体良いって書いてあったな)
+      - Blue/Greenに加えてさらに以下の考慮が必要
+        - トラフィックをある割合のユーザーにシフトする能力  
+        - 新リリースと比較するための定常状態に関する確かな知識  
+        - 新しいリリースが「良い」状態なのか「悪い」状態なのかを理解するための指標
+      - 複数のバージョンのアプリケーションを同時に実行することに苦しむ
+        - データベーススキーマは必ず両方のバージョンを用意する必要がある
+  - デプロイメントのテスト  
+    - 本番環境でのテストは、アプリケーションの回復力、スケーラビリティ、およびUXに対する信頼性を高めるのに役立つ
+    - 実運用環境でのテストには課題やリスクがつきものだが、システムの信頼性を確保するために努力する価値がある
+    - 実運用環境でのテストの影響を特定できるような、綿密な観測可能性戦略を確立しておく必要がある
+    - エンドユーザーのアプリケーション体験に影響を与える指標を観察できなければ、システムの耐障害性を向上させるために何に焦点を当てるべきか、明確な指標を得ることはできない→つまりSLOちゃんと決めとけ
+    - ツールは色々ある
+      - Canary deployments  
+      - A/B testing  
+      - Traffic shifting  
+      - Feature flags  
+  - カオステスト
+    - カオスエンジニアリングは、Netflixによって開発された
+    - カオスエンジニアリングとは、本番システムに実験を導入し、システムの弱点を発見する手法
+    - 「ゲームデイ」実験をやるといい
+      1. 仮説を立て、定常状態について学ぶ。
+      1. システムに影響を与える可能性のある現実の事象を様々な程度で用意する。
+      1. 制御グループを作り、定常状態と比較する実験をする。
+      1. 実験を行い、仮説を立てる。
+    - なぜステージングでテストしないのか？→本番固有の問題に気づけない
+      - リソースの非同期配置  
+      - 本番環境からの設定変更
+      - トラフィックとユーザー行動は合成的に生成される傾向がある。
+      - 生成されるリクエストの数が実際のワークロードを模倣していない。
+      - ステージングに実装されたモニタリングの欠如。
+      - 展開されたデータサービスには、本番環境とは異なるデータや負荷が含まれている。
+- CI/CDのやり方
+  - アプリケーションコードのビルドを実行する  
+  - コードに対するテストの実行  
+  - テストに成功したら、コンテナイメージを構築する コンテナイメージをコンテナレジストリにプッシュする
+  - Kubernetesにアプリケーションをデプロイする
+  - デプロイされたアプリケーションに対してテストを実行する
+  - デプロイメントに対するローリングアップグレードの実行
+- CI/CDのベストプラクティス
+  - CIでは、自動化と迅速なビルドを提供することに重点を置く。ビルド速度を最適化することで、開発者の変更がビルドを破壊した場合に、開発者に迅速なフィードバックを提供することができる。
+  - パイプラインでは、信頼性の高いテストを提供することに重点を置く。これにより、開発者は自分のコードの問題点を迅速にフィードバックすることができる。開発者へのフィードバックのループが速ければ速いほど、ワークフローの生産性が向上する。
+  - CI/CDツールを決定する際には、パイプラインをコードとして定義できるツールであることを確認する。これにより、パイプラインをアプリケーションのコードと一緒にバージョン管理することができる。
+  - イメージを最適化することで、イメージのサイズを小さくし、本番環境でイメージを実行する際の攻撃対象領域を小さくすることができることを確認する。multi stage Dockerビルドでは、アプリケーションの実行に必要ないパッケージを削除することができる。例えば、アプリケーションをビルドするためにMavenが必要でも、実際に実行するイメージには必要ない場合がある。
+  - イメージのタグとして "latest" を使うのは避け、buildID や Git commit を参照できるタグを利用する。
+  - CDに不慣れな方は、まずKubernetesのローリングアップグレードを活用する。これは使いやすく、デプロイに慣れることができる。CDに慣れ、自信がついてきたら、Blue/Greenやカナリアデプロイメント戦略を活用することも視野に入れる。
+  - CDでは、クライアント接続とデータベーススキーマのアップグレードがアプリケーションでどのように処理されるかを確実にテストする。
+  - 実運用環境でのテストは、アプリケーションに信頼性を持たせ、適切な監視を行うのに役立つ。実稼働環境でのテストでは、小規模から始めて、実験の爆発半径を制限する。
 
 ## Chapter 6. Versioning, Releases, and Rollouts
 
+- 従来のモノリシック・アプリケーションの主な不満点の1つは、時間が経つにつれて規模が大きくなりすぎて、ビジネスが求めるスピードで適切にアップグレード、バージョンアップ、または修正を行うことができなくなること
+- 新しいコードを素早く反復し、新しい問題を解決し、隠れた問題が大きな問題になる前に修正できること、そしてダウンタイムゼロのアップグレードを約束することは、この変化し続けるインターネット経済の世界で開発チームが目指す目標
+- バージョニングについて
+  - 重要なのは、パターンを選んで、それにこだわること
+  - 基本的にセマンティックバージョニングが最も有用
+    - `v<メジャー>.<マイナー>.<パッチ>`
+    - メジャー: APIの互換性がない
+    - マイナー: APIの互換性がある
+    - パッチ: バグを直しただけ
+  - 最も重要なことは、システム全体に一貫性があること
+- リリースについて
+  - Kubernetesにはリリースコントローラが存在しないため、リリースというネイティブな概念はない
+    - Deploymentのmetadata.labels specおよび/またはpod.spec.template.metadata.label specで追加される
+  - 重要なのは、バージョン管理の方法と、クラスタのシステム状態のどこに表示されるかの一貫性
+  - リリース名は、特定の名前の定義について組織的な合意があれば、非常に有用
+    - 多くの場合、stable や canary といったラベルが使用され、サービスメッシュのようなツールを追加して細かいルーティングを決定する際に、ある種の運用管理を行うのに役立つ
+  - ラベル自体は非常に自由な形式で、APIの構文規則に従った任意のキーと値のペアにすることができる。重要なのは内容ではなく、各コントローラがどのようにラベルを処理するか、ラベルの変更、ラベルのセレクタマッチングを行うか
+    - Deployments, ReplicaSets, DaemonSets は、直接のマッピングやセットベースの式によるラベルを介したポッドのセレクタベースのマッチングをサポートする
+    - つまり、新しいセレクタを追加してポッドのラベルが一致した場合、既存のReplicaSetをアップグレードするのではなく、新しいReplicaSetが作成されることを意味する
+- ロールアウトについて
+  - Deploymentコントローラは、特定の戦略を使用して更新プロセスを自動化し、デプロイメントの spec.template への変更に基づいて宣言された新しい状態をシステムが読み取ることができるようにする
+    - Deployment メタデータ フィールドのラベルを変更し、マニフェストを再適用しても更新がトリガーされない
+  - KubernetesのDeploymentはrollingUpdateとrecreateの2つのストラテジーをサポートしており、前者がデフォルトとなっている。
+    - ローリングアップデートが指定された場合、デプロイは必要なレプリカの数にスケールするために新しいReplicaSetを作成し、古いReplicaSetはmaxUnavailbleとmaxSurgeの特定の値に基づいてゼロまでスケールダウンされる
+    - Deploymentコントローラーが更新の履歴を保持し、CLIを通じてデプロイメントを以前のバージョンにロールバックできる
+  - recreate戦略ははReplicaSet内のPodが完全に停止してもサービスをほとんどダウンさせずに処理できる特定のワークロードに有効な戦略
+    - Deploymentコントローラは新しい構成で新しいReplicaSetを作成し、新しいPodをオンラインにする前に以前のReplicaSetを削除する
+    - 新しいポッドがオンラインになるのを待っている間はメッセージがキューに入り、新しいポッドがオンラインになるとすぐにメッセージ処理が再開されるため、キューベースのシステムの背後にあるサービスは、このタイプの中断に対応できる
+- ベストプラクティスなyamlの一例
+  
+  ```yaml
+  # Web Deployment
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: gb-web-deploy
+    labels:
+      app: guest-book
+      appver: 1.6.9
+      environment: production
+      release: guest-book-stable
+      release number: 34e57f01
+  spec:
+    strategy:
+      type: rollingUpdate
+      rollingUpdate:
+        maxUnavailbale: 3
+        maxSurge: 2
+    selector:
+      matchLabels:
+        app: gb-web
+        ver: 1.5.8
+      matchExpressions:
+        - {key: environment, operator: In, values: [production]}
+    template:
+      metadata:
+        labels:
+          app: gb-web
+          ver: 1.5.8
+          environment: production
+      spec:
+        containers:
+        - name: gb-web-cont
+          image: evillgenius/gb-web:v1.5.5
+          env:
+          - name: GB_DB_HOST
+            value: gb-mysql
+          - name: GB_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-pass
+                key: password
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          ports:
+          - containerPort: 80
+  ---
+  # DB Deployment
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: gb-mysql
+    labels:
+      app: guest-book
+      appver: 1.6.9
+      environment: production
+      release: guest-book-stable
+      release number: 34e57f01
+  spec:
+    selector:
+      matchLabels:
+        app: gb-db
+        tier: backend
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app: gb-db
+          tier: backend
+          ver: 1.5.9
+          environment: production
+      spec:
+        containers:
+        - image: mysql:5.6
+          name: mysql
+          env:
+          - name: MYSQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-pass
+                key: password
+          ports:
+          - containerPort: 3306
+            name: mysql
+          volumeMounts:
+          - name: mysql-persistent-storage
+            mountPath: /var/lib/mysql
+        volumes:
+        - name: mysql-persistent-storage
+          persistentVolumeClaim:
+            claimName: mysql-pv-claim
+  ---
+  # DB Backup Job
+  apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: db-backup
+    labels:
+      app: guest-book
+      appver: 1.6.9
+      environment: production
+      release: guest-book-stable
+      release number: 34e57f01
+    annotations:
+      "helm.sh/hook": pre-upgrade
+      "helm.sh/hook": pre-delete
+      "helm.sh/hook": pre-rollback
+      "helm.sh/hook-delete-policy": hook-succeeded
+  spec:
+    template:
+      metadata:
+        labels:
+          app: gb-db-backup
+          tier: backend
+          ver: 1.6.1
+          environment: production
+      spec:
+        containers:
+        - name: mysqldump
+          image: evillgenius/mysqldump:v1
+          env:
+          - name: DB_NAME
+            value: gbdb1
+          - name: GB_DB_HOST
+            value: gb-mysql
+          - name: GB_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-pass
+                key: password
+          volumeMounts:
+            - mountPath: /mysqldump
+              name: mysqldump
+        volumes:
+          - name: mysqldump
+            hostPath:
+              path: /home/bck/mysqldump
+        restartPolicy: Never
+    backoffLimit: 3
+  ```
+
+  - 間違っているように見えるが（バージョンが異なるところとか）それは↓のベストプラクティスにて解説
+- バージョニング、リリース、ロールアウトのベストプラクティス
+  - アプリケーション全体を構成するコンテナのバージョンやポッドのデプロイのバージョンとは異なる、アプリケーション全体に対するセマンティック・バージョニングを使用する。
+    - これにより、アプリケーションを構成するコンテナと、アプリケーション全体のライフサイクルを独立させることができます。
+    - これは、最初はかなり混乱するかもしれないが、一方が他方を変更するタイミングについて原則的な階層的アプローチを取れば、簡単に追跡することができる。
+    - 前の例では、コンテナ自体は現在 v1.5.5 だが、ポッドのspecは 1.5.8。これは、新しい ConfigMap、追加の秘密、またはレプリカ値の更新など、ポッドの仕様に変更が加えられたが、使用される特定のコンテナのバージョンは変更されていないことを意味する可能性がある。
+    - アプリケーション自体、つまりゲストブックのアプリケーション全体とそのすべてのサービスのバージョンは 1.6.9 で、これは運用によって、この特定のサービスだけでなく、アプリケーション全体を構成する他のサービスなどにも変更が加えられたことを意味する可能性がある。
+  - CI/CDパイプラインからのリリースを追跡するために、デプロイメントメタデータにリリースとリリースバージョン/番号のラベルを使用する。
+    - リリース名とリリース番号は、CI/CDツールの記録における実際のリリースと一致させる必要がある。
+    - これにより、CI/CDプロセスからクラスタへのトレーサビリティが可能になり、ロールバックの識別が容易になる。
+    - 前の例では、リリース番号はマニフェストを作成した CD パイプラインのリリース ID に直接由来している。
+  - Kubernetesにデプロイするサービスのパッケージ化にHelmを使用する場合、ロールバックやアップグレードが必要なサービスを同じHelmチャートにまとめておくよう、特に注意する。
+    - Helmを使えば、アプリケーションの全コンポーネントを簡単にロールバックして、アップグレード前の状態に戻すことができる。
+    - Helm はフラット化された YAML 設定を渡す前に、テンプレートとすべての Helm ディレクティブを実際に処理するため、ライフサイクルフックを使用すると、特定のテンプレートの適用を適切に順序付けることができる。
+    - オペレータは適切な Helm ライフサイクルフックを使用することで、アップグレードやロールバックが正しく行われるようにすることができる。
+    - Helm ライフサイクルフックを使って、Helm リリースのロールバック、アップグレード、削除の前にテンプレートがデータベースのバックアップを実行することを保証できる。
+    - また、KubernetesでTTL Controllerがアルファ版から出るまでは、手動でクリーンアップする必要があったJobの実行が成功した後に、Jobが削除されることを保証できる。
+    - 組織の運用テンポに合ったリリース命名法に合意する。単純なstable、canary、alphaの状態は、ほとんどの状況において非常に適切である。
+
 ## Chapter 7. Worldwide Application Distribution and Staging
+
+- ちょっと飛ばす
 
 ## Chapter 8. Resource Management
 
+- Kubernetes Schedulerについて
+  - コントロールプレーンでホストされる主要コンポーネントの1つ
+  - KubernetesはクラスタにデプロイされたPodの配置を決定することができる
+  - Predicate(断定と訳せばよい？←true/falseを返す関数)
+    - Kubernetes Schedulerはまずpredicate functionを実行する
+      - falseだったら対象から外す
+    - チェックするのは以下の通り
+      - CheckNodeConditionPred
+      - CheckNodeUnschedulablePred
+      - GeneralPred
+      - HostNamePred
+      - PodFitsHostPortsPred
+      - MatchNodeSelectorPred
+      - PodFitsResourcesPred
+      - NoDiskConflictPred
+      - PodToleratesNodeTaintsPred
+      - PodToleratesNodeNoExecuteTaintsPred
+      - CheckNodeLabelPresencePred
+      - CheckServiceAffinityPred
+  - Priorities(優先順位)
+    - スコアを出してランクづけをする
+    - チェックするのは以下の通り
+      - EqualPriority
+      - MostRequestedPriority
+      - RequestedToCapacityRatioPriority
+      - SelectorSpreadPriority
+      - ServiceSpreadingPriority
+      - InterPodAffinityPriority
+      - LeastRequestedPriority
+      - BalancedResourceAllocation
+      - NodePreferAvoidPodsPriority
+      - NodeAffinityPriority
+      - TaintTolerationPriority
+      - ImageLocalityPriority
+      - ResourceLimitsPriority
+- スケジューリングのテクニック
+  - 可用性を高めるために同じReplicaSetからのPodをノード間で分散させようとし、リソース使用率のバランスを取ることができる
+  - ゾーン障害によるアプリケーションのダウンタイムを軽減するために、アベイラビリティゾーンをまたいでPodをスケジュールすることができる
+  - パフォーマンス上のメリットを得るために、特定のホストにPodをコロケートすることもできる
+- Pod Affinity と Anti-Affinity について
+  - スケジューリングの動作を変更し、スケジューラーの配置決定を上書きすることができる
+    - 例えばリソースで優先順位が決まると同じノード、AZに。。とかもあり得る
+  - affinity: ポッドを同じノードにスケジュールする
+  - anti affinity: ポッドが同じノードにスケジュールされないようにする
+  - 以下の例では単一ノードにレプリカをコロケートしないように設定している
+
+    ```yaml
+    apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+      name: nginx
+      spec:
+      selector:
+          matchLabels:
+          app: frontend
+      replicas: 4
+      template:
+          metadata:
+          labels:
+              app: frontend
+          spec:
+          affinity:
+              podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                  - key: app
+                      operator: In
+                      values:
+                      - frontend
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+          - name: nginx
+              image: nginx:alpine
+    ```
+
+- nodeSelectorについて
+  - 特定のノードに Pod をスケジュールする最も簡単な方法
+  - GPUマシンへの割り当てとかそういうのに利用できる
+
+  ```yaml
+  apiVersion: v1
+  kind: Pod
+  metadata:
+    name: redis
+    labels:
+      env: prod
+  spec:
+    containers:
+    - name: frontend
+      image: nginx:alpine
+      imagePullPolicy: IfNotPresent
+    nodeSelector:
+      disktype: ssd
+  ```
+
+- Taints と Tolerations(taint(汚染)をtolerations(容認)できるならscheduleする)
+  - taintは、ノード上でpodをスケジュールからはじくために使用される。それってanti affinityとおなじじゃね？
+    - 同じだけど、異なるユースケースを提供する
+    - 特定のパフォーマンス・プロファイルを必要とするPodがあり、特定のノードに他のPodをスケジュールしたくないとする。taintはtolerationと連動しており、taintされたノードをオーバーライドすることができる
+    - これはanti affinityより細かい制御ができる
+      - 特殊なノードハードウェア
+      - 専用ノードリソース
+      - デグレードノードの回避
+  - コンテナのスケジューリングと実行に影響を与えるテイントの種類は複数ある
+    - NoSchedule: そのノードでのスケジューリングを妨げるハードtaint
+    - PreferNoSchedule: 他のノードでPodがスケジュールできない場合のみ、スケジューリングする
+    - NoExecute: ノード上で既に実行されているポッドを退避させる
+    - NodeCondition: 特定の条件を満たした場合にノードをtaintする
+  - ディスクドライブの不良でノードが不健康になった場合、taintベースのevictionによって、そのホスト上のpodをクラスタ内の別の健康なノードにリスケジュールすることができる
+- Podリソースマネジメントについて
+  - Kubernetesでアプリケーションを管理する上で最も重要なことの1つは、Podリソースを適切に管理すること
+  - リソースは、コンテナレベルおよびネームスペースレベルで管理することができる
+  - ネットワークやストレージなどのリソースがあるが、Kubernetesにはまだそれらのリソースに対する要求や制限を設定する方法はない
+  - resouce requestについて
+    - コンテナがスケジュールされるためにX量のCPUまたはメモリを必要とすることを定義する
+    - ポッドがスケジュールできない場合、必要なリソースが利用できるようになるまでpending状態になる
+  - resouce limitと podのQoSについて
+    - Podに与えられるCPUやメモリの最大値を定義するもの
+    - CPUとメモリに制限を指定すると、指定された制限に達したときにそれぞれ異なるアクションが実行される
+      - CPU: コンテナは指定された制限値を超えて使用しないようにスロットルされる
+      - メモリ: 制限に達するとポッドが再起動される
+    - podは、クラスタ内の同じホストまたは別のホストで再起動される場合がある
+    - コンテナに対してlimitを指定することは、アプリケーションがクラスタ内でリソースを公平に割り当てられるようにするための良い方法
+    - Podが作成されるとQoSが割り当てられる
+      - Guaranteed: request = limitの場合
+      - Burstable: request < limitの場合
+      - Best effort: requetもしくはlimitを指定しなかった場合
+    - 全てのコンテナにrequestとlimitを割り当てることが重要
+- PodDisruptionBudgetsについて
+  - ある時点で、KubernetesはホストからPodを立ち退かせる(evictする)必要が出てくるかもしれない
+  - 2つのevictionの方法がある→任意(voluntary)と不本意(involuntary)
+    - voluntary: クラスタのメンテナンスの実行、Cluster Autoscalerのノード割り当て解除、またはPodテンプレートの更新によって引き起こされる可能性がある
+    - involuntary: ハードウェア障害、ネットワークパーティション、カーネルパニック、またはノードがリソース不足になることで発生する可能性がある
+  - アプリケーションへの影響を最小限に抑えるために、PodDisruptionBudgetを設定して、Podの立ち退きが必要なときにアプリケーションのアップタイムを確保することができる
+    - 自発的な立ち退きイベントの際に利用可能な最小ポッド数と利用不可能な最大ポッド数に関するポリシーを設定できる
+    - 自発的な立ち退きの例としては、ノードのメンテナンスを行うためにノードを排出する場合などがある
+    - たとえば、アプリケーションに属するPodのうち20%以上は一度に停止できないように指定することができる。
+    - このポリシーは、常に利用可能でなければならないレプリカの数Xという形で指定することもできる。
+  - Minimum availableの例。
+
+    ```yaml
+    kind: PodDisruptionBudget
+    metadata:
+    name: frontend-pdb
+    spec:
+    minAvailable: 5
+    selector:
+        matchLabels:
+        app: frontend 
+    ```
+
+    - 常に5つのレプリカポッドが利用可能でなければならないことを指定している。
+    - このシナリオでは、5つのPodが利用可能である限り、立ち退きは望むだけ行うことができる。
+  - Maximum unavalableの例
+
+    ```yaml
+    apiVersion: policy/v1beta1
+    kind: PodDisruptionBudget
+    metadata:
+    name: frontend-pdb
+    spec:
+    maxUnavailable: 20%
+    selector:
+        matchLabels:
+        app: frontend
+    ```
+
+    - 任意の時点で20%以上のレプリカpodが利用できなくなるように指定している
+    - maxUnavailableを50％に指定した場合、それが3つのPodなのか4つのPodなのかがはっきりしないことがある。この場合、Kubernetesは最も近い整数に切り上げるので、maxAvailableは4ポッドとなる。
+- namespaceを使ったリソースマネジメント
+  - ソフトなマルチテナンシー機能を備えているため、特定のインフラをチームやアプリケーションに割り当てることなく、クラスタ内のワークロードを分離することができる
+    - クラスタリソースを最大限に活用しながら、論理的な分離を維持することができる
+    - たとえば、チームごとにネームスペースを作成し、各チームにCPUやメモリなどの利用可能なリソース数のクォータを与えることができる
+    - 1つのクラスタを使用するチームが複数ある場合は、通常、各チームにネームスペースを割り当てるのが最適
+    - クラスターを1つのチームだけに割り当てる場合は、クラスターにデプロイされた各サービスにネームスペースを割り当てるのが理にかなっている場合がある
+    - 唯一の解決策はなく、チームの組織と責任によって設計が推進される
+  - デフォルトのnamespace
+    - kube-system: coredns、kube-proxy、metrics-serverなど、Kubernetesの内部コンポーネントがここにデプロイされる
+    - default: リソースオブジェクトでネームスペースを指定しない場合に使用されるデフォルトのネームスペース
+    - kube-public: 匿名および未認証のコンテンツに使用され、システム使用用に予約されている
+  - 複数のクラスタやnamespaceの切り替えはkubensやkubectxが便利
+  - ResouceQuotaについて
+    - 複数のチームやアプリケーションが1つのクラスタを共有する場合、ネームスペースにResourceQuotasを設定することが重要
+    - クラスタを論理的な単位で分割して、単一のネームスペースがクラスタのリソースのシェアを超える量を消費できないようにすることができる
+    - 以下のリソースにクォータを設定することができる
+      - Compute Resouces
+        - requests.cpu: CPU要求の合計がこの値を超えることはできない
+        - limits.cpu: CPUの制限値の合計がこの値を超えることはできない
+        - requests.memory: メモリ要求の合計は、この量を超えることはできない
+        - limit.memory: メモリの制限の合計は、この量を超えることはできない
+      - Storage Resouces
+        - requests.storage: ストレージの要求の合計はこの値を超えることはできない
+        - persistentvolumeclaims: ネームスペースに存在できるPersistentVolumeのクレームの総数
+        - storageclass.request: 指定されたストレージクラスに関連するボリューム要求は、この値を超えることはできない
+        - storageclass.pvc: ネームスペースに存在できるPersistentVolumeのクレームの総数
+      - Object count quotas (only an example set)  
+        - count/pvc
+        - count/services
+        - count/deployments
+        - count/replicasets
+    - 例
+
+      ```yaml
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: mem-cpu-demo
+        namespace: team-1
+      spec:
+        hard:
+          requests.cpu: "1"
+          requests.memory: 1Gi
+          limits.cpu: "2"
+          limits.memory: 2Gi
+          persistentvolumeclaims: "5"
+          requests.storage: "10Gi
+      ```
+
+  - LimitRangeについて
+    - Kubernetesにはアドミッション・コントローラが用意されており、specに何も記載がない場合は自動的にlimit, requestを設定することができる
+    - 例
+
+      ```yaml
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: team-1-limit-range
+      spec:
+        limits:
+        - default:
+            memory: 512Mi
+          defaultRequest:
+            memory: 256Mi
+          type: Container
+      ```
+
+  - Cluster Scalingについて
+    - クラスターをデプロイする際に最初に決定しなければならないことのひとつが、クラスター内で使用するインスタンスサイズ
+      - 特にひとつのクラスターで複数のワークロードを混在させる場合は難しい
+      - CPUとメモリのバランスをうまくとることもひとつの方法
+    - Manual Scalingについて
+      - マネージドKubernetesのようなツールを使用している場合、クラスタを簡単にスケーリングすることができる
+      - これらのツールでは、ノードプールを作成することもでき、すでに稼働しているクラスターに新しいインスタンスタイプを追加することができる
+        - あるワークロードはCPU駆動型で、他のワークロードはメモリ駆動型のアプリケーションである場合がある
+        - ノードプールを利用すれば、1つのクラスタ内で複数のインスタンスタイプを混在させることができる
+      - クラスタのオートスケールには考慮すべき点があり、ほとんどのユーザーは、リソースが必要になったときに手動でノードをプロアクティブにスケーリングすることから始めた方がよい
+    - Cluster autoscalingについて
+      - クラスタで利用可能な最小ノードと、クラスタがスケールできる最大ノード数を設定することが可能
+      - Cluster Autoscalerは、Podがペンディングになるタイミングを基準にスケールを決定する
+        - Kubernetesスケジューラが4,000 Mibのメモリ要求を持つPodをスケジュールしようとし、クラスタが2,000 Mibしか利用できない場合、そのPodはペンディング状態になる。
+        - Podがペンディング状態になった後、Cluster Autoscalerはクラスタにノードを追加する
+      - Cluster Autoscalerの欠点
+        - 新しいノードが追加されるのはPodがペンディングになる前なので、ワークロードがスケジュールされたときに新しいノードがオンラインになるのを待つことになる可能性がある
+      - Cluster Autoscalerは、リソースが不要になった後に、クラスタのサイズを縮小することもできる
+      - リソースが不要になると、ノードを排出し、クラスタ内の新しいノードにPodを再スケジュールする
+      - PodDisruptionBudgetを使用して、クラスタからノードを削除するためにDrain操作を実行するときに、アプリケーションに悪影響を与えないようにすることが望まれる
+  - Application Scalingについて
+    - Deployment内のレプリカの数を手動で変更することで、アプリケーションをスケールすることができる
+    - ReplicasetやReplicationControllerの利用はNG
+    - 手動スケーリングは、静的なワークロードやワークロードが急増する時期がわかっている場合には全く問題ないが、突然のスパイクが発生するワークロードや静的ではないワークロードの場合、手動スケーリングはアプリケーションにとって理想的ではない
+    - HPA（Horizontal Pod Autoscaler）を使いましょう
+      - CPU、メモリ、またはカスタムメトリクスに基づいてデプロイメントをスケーリングすることができる
+      - 利用可能なポッドの最小数と最大数を設定することも可能
+        - たとえば、Podの最小数を3、最大数を10に設定し、デプロイがCPU使用率80%に達するとスケールするHPAポリシーを定義できる。
+        - アプリケーションのバグや問題によって、HPAがレプリカを無限にスケールさせることは避けたいため、最小値と最大値の設定は非常に重要。
+      - HPAには、メトリックの同期、レプリカのアップスケール、ダウンスケールに関する次のデフォルト設定がある。
+      - ワークロードが極端に変動する場合は、設定を弄って特定のユースケースに最適化する価値がある
+      - カスタムメトリクスを使うのはとてもよい
+        - たとえば、外部のストレージキューで収集しているメトリクスに基づいてスケーリングすることができる
+    - Vertical Pod Autoscaler（VPA）もあるけど非推奨
+      - アーキテクチャ上、スケールアウトできないワークロードの場合、リソースを自動的にスケールさせるのに効果的
+        - 例えばDB(できればマネージドのを使え。。)
+      - Kubernetes v1.15では、VPAはプロダクションデプロイメントに推奨されない
+- リソース管理ベストプラクティス
+  - Podのanti affinityを利用して、複数のアベイラビリティゾーンにワークロードを分散させ、アプリケーションの高可用性を確保する
+  - GPU 対応ノードなどの特殊なハードウェアを使用している場合は、taintを使用して、GPU を必要とするワークロードのみがこれらのノードにスケジューリングされるようにする。
+  - NodeConditionテイントを使用して、障害ノードやデグレードノードをプロアクティブに回避する。
+  - podのspecにnodeSelectorを適用して、クラスタに配置した特殊なハードウェアにポッドをスケジュールする。
+  - 実運用に入る前に、さまざまなノード・サイズを実験して、ノード・タイプのコストと性能の良い組み合わせを見つける。
+  - 性能特性の異なるワークロードを混在して展開する場合は、ノードプールを利用して、1つのクラスターに複数のノードタイプを混在させる。
+  - クラスタにデプロイされたすべてのpodに対して、メモリとCPUの制限を設定することを確認する。
+  - ResourceQuotasを使用して、複数のチームまたはアプリケーションにクラスタ内のリソースを公平に割り当てるようにする。
+  - LimitRangeを実装して、制限や要求を設定しないPodの仕様に対してデフォルトの制限と要求を設定する。
+  - Kubernetesでのワークロードプロファイルを理解するまで、手動によるクラスタースケーリングから始める。オートスケールを使用することもできるが、ノードのスピンアップタイムとクラスタのスケールダウンに関する追加の考慮事項が伴う。
+  - 変動が激しく、使用量が予想外に急増するワークロードには、HPAを使用します。
+
 ## Chapter 9. Networking, Network Security, and Service Mesh
+
+- Kubernetesは事実上、接続されたシステムのクラスタにまたがる分散システムのマネージャー→接続されたシステム同士がどのように通信するかが即座に非常に重要になり、その鍵を握るのがネットワーク
+- Kubernetesネットワークの原理
+  - 同じPod内のすべてのコンテナは、同じネットワーク空間を共有する。これにより、コンテナ間のローカルホスト通信が効果的に行えるようになる
+  - すべてのpodは、ネットワーク・アドレス変換（NAT）なしで互いに通信する必要がある
+    - ノードがNATを介さずにポッドと直接通信できることにも及ぶ。
+    - これにより、ホストベースのエージェントやシステム・デーモンが必要に応じてポッドに通信することができる
+  - KubernetesのServiceは、各ノードで見つかる耐久性のあるIPアドレスとポートを表し、そのサービスにマッピングされたエンドポイントにすべてのトラフィックを転送する
+- ネットワークプラグインについて
+  - kubenet
+    - Kubernetesにデフォルトで搭載されている最も基本的なネットワークプラグイン
+    - ベストプラクティス
+      - Kubenetはシンプルなネットワークスタックを可能にし、すでに混雑しているネットワークで貴重なIPアドレスを消費しないようにする。これは特に、オンプレミスのデータセンターに拡張されるクラウドネットワークに当てはまる。
+      - podのCIDR範囲が、クラスタの潜在的なサイズと各クラスタ内のポッドを処理するのに十分な大きさであることを確認する。kubeletで設定されているノードあたりのポッドのデフォルトは110だが、これを調整することができる。
+      - トラフィックが適切なノードのポッドを見つけることができるように、ルートルールを理解し、それに応じて計画する。クラウドプロバイダーでは通常自動化されているが、オンプレミスやエッジケースでは自動化としっかりとしたネットワーク管理が必要になる。
+  - CNI
+    - CNI が提供するインタフェースと最小限の API アクション、そしてクラスタで使用されるコンテナランタイムとのインタフェースを規定している
+    - ベストプラクティス
+      - インフラストラクチャの全体的なネットワーク目標を達成するために必要な機能セットを評価する。
+        - CNIプラグインの中には、ネイティブの高可用性、マルチクラウド接続、Kubernetesネットワークポリシーのサポート、その他様々な機能を提供する。
+      - パブリッククラウドプロバイダー経由でクラスタを実行する場合、クラウドプロバイダーのソフトウェア定義ネットワーク（SDN）にネイティブでないCNIプラグインが実際にサポートされているかどうかを確認する。
+      - ネットワークセキュリティツール、ネットワーク観測性、管理ツールが、選択した CNI プラグインと互換性があるかどうかを確認し、互換性がない場合は、既存のツールを置き換えることができるツールを調査する。
+        - Kubernetesのような大規模分散システムに移行するとニーズが拡大するため、観測性とセキュリティの両機能を失わないことが重要である。
+        - Weaveworks Weave Scope、Dynatrace、SysdigといったツールをどのKubernetes環境にも追加でき、それぞれにメリットがある。
+        - Azure AKS、Google GCE、AWS EKSなどのクラウドプロバイダーのマネージドサービスで実行している場合は、Azure Container InsightsやNetwork Watcher、Google Stackdriver、AWS CloudWatchなどのネイティブツールを探す。
+        - どのツールを使うにしても、少なくともネットワークスタックと、素晴らしいGoogle SREチームとRob Ewashuckによって有名になった「4つのゴールデンシグナル（レイテンシ、トラフィック、エラー、飽和）」についての洞察を提供する必要がある。
+      - SDN ネットワーク空間とは別のオーバーレイネットワークを提供しない CNI を使っている場合、ノード IP、ポッド IP、内部ロードバランサ、クラスタのアップグレードとスケールアウト処理のオーバーヘッドを扱うための適切なネットワークアドレス空間を持っていることを確認する。
+- Services
+  - KubernetesクラスタにPodをデプロイすると、Kubernetesのネットワークの基本ルールと、そのルールを促進するために使用されるネットワークプラグインのために、Podは同じクラスタ内の他のPodとしか直接通信できない
+  - CNIプラグインの中には、ノードと同じネットワーク空間上のポッドにIPを与えるものがあり、技術的にはポッドのIPが判明した後は、クラスタ外から直接アクセスできるようになる(AWSもそう)
+  - KubernetesのPodはエフェメラルであるため、Podが提供するサービスにアクセスする効率的な方法ではない
+  - Services APIは、Kubernetesクラスタ内で耐久性のあるIPとポートを割り当て、サービスのエンドポイントとして適切なポッドに自動的にマッピングすることを可能にする
+    - kube-proxyが管理している
+  - Servicesオブジェクトを定義する際には、serviceの種類を定義する必要があります。serviceタイプによって、エンドポイントをクラスタ内だけで公開するか、クラスタ外で公開するかが決まる
+  - serviceタイプは4つある
+    - Cluster IP
+      - デフォルトのserviceタイプ
+      - 指定されたserviceのCIDR範囲からIPが割り当てられる
+      - selectorフィールドを使ってバックエンドのPodにIPとポート、プロトコルのマッピングを提供する(selectorを持たないこともできる)
+      - DNSパターンは`<service_name>.<namespace_name>.svc.cluster.local`となる。同じnamespaceの場合は`<service_name>`だけで名前解決できる
+    - NodePort
+      - クラスタの各ノード上の上位ポートを各ノード上のサービスIPとポートに割り当る。
+      - 高レベルのNodePortは30,000から32,767の範囲にあり、静的に割り当てるか、サービス仕様で明示的に定義することができる
+    - ExternalName
+      - 実際にはほとんど使用されない
+      - クラスタ耐久性のあるDNS名を外部DNSネームドサービスに渡すのに便利
+        - たとえば、awsのAuroraのDNS名って長いけど、それを短くしたいときとか。。
+    - LoadBalancer
+      - クラウドプロバイダや他のプログラマブルなクラウドインフラストラクチャサービスとの自動化を可能にする
+      - 各クラウドプロバイダには、内部専用のロードバランサーやAWS ELB設定パラメータなど、他の機能を有効にするための固有のアノテーションがいくつかある
+      - 内部的には前段にLoadBalancerを置いてNodePortを利用している
+- Ingress / Ingress Controller
+  - アプリケーションのロードバランサーとしてはHTTPを利用することが多い→Ingressを利用する
+  - TLS終端, WAFなどを利用できる
+- ServiceとIngressのベストプラクティス
+  - アプリケーションが相互に接続された複雑な仮想ネットワーク環境を構築するには、綿密な計画が必要
+  - アプリケーションのさまざまなサービスが互いに、また外部と通信する方法を効果的に管理するには、アプリケーションが変更されるたびに常に注意を払う必要がある
+  - クラスタの外部からアクセスする必要があるサービスの数を制限する。理想的には、ほとんどのサービスがClusterIPであり、外部向けのサービスだけがクラスタの外部に公開されるようにする
+  - もし公開する必要があるサービスが主にHTTP/HTTPSベースのサービスであれば、Ingress APIとIngressコントローラを使用して、TLSターミネーションでバッキングサービスにトラフィックをルーティングするのがベスト。
+    - 使用するIngressコントローラの種類によっては、レート制限、ヘッダー書き換え、OAuth認証、観測性などの機能を、アプリケーション自体に組み込むことなく利用できるようになる。
+  - Web ベースのワークロードを安全に取り込むために必要な機能を持つ Ingress コントローラを選択する。
+    - 特定の構成アノテーションの多くが実装間で異なり、エンタープライズKubernetes実装間でデプロイコードを移植することができないため、1つに標準化して企業全体で使用するようにする
+  - クラウドサービスプロバイダ固有のIngressコントローラオプションを評価し、インフラ管理とIngressの負荷をクラスタの外に移動させ、かつKubernetes API構成を可能にする。
+  - 主にAPIを外部に提供する場合、APIベースのワークロードをより細かく調整できるKongやAmbassadorなど、API専用のIngressコントローラを評価する。
+    - NGINXやTraefikなどもAPIチューニングを提供するかもしれないが、特定のAPIプロキシシステムほどきめ細かくはないだろう。
+  - IngressコントローラをKubernetesのPodベースのワークロードとしてデプロイする場合、デプロイが高可用性と集約的なパフォーマンススループットのために設計されていることを確認すること。
+    - メトリクスの観測性を利用してIngressを適切にスケールさせるが、ワークロードのスケール中にクライアントが中断しないよう、十分なクッションを入れる。
+- Network Security Policy 
+  - 
+
 
 ## Chapter 10. Pod and Container Security
 
@@ -380,26 +1099,18 @@
 
 ## Chapter 13. Integrating External Services and Kubernetes
 
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.290). O'Reilly Media. Kindle 版. 
 
 ## Chapter 14. Running Machine Learning in Kubernetes
 
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.306). O'Reilly Media. Kindle 版. 
+- ちょっと飛ばす
 
 ## Chapter 15. Building Higher-Level Application Patterns on Top of Kubernetes
 
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.325). O'Reilly Media. Kindle 版. 
 
 ## Chapter 16. Managing State and Stateful Applications
 
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.336). O'Reilly Media. Kindle 版. 
 
 ## Chapter 17. Admission Control and Authorization
 
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.354). O'Reilly Media. Kindle 版. 
 
 ## Chapter 18. Conclusion
-
-Burns, Brendan; Villalba, Eddie; Strebel, Dave; Evenson, Lachlan. Kubernetes Best Practices (p.371). O'Reilly Media. Kindle 版. 
-
-##
