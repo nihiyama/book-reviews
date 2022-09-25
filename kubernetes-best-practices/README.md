@@ -1086,14 +1086,448 @@
     - NGINXやTraefikなどもAPIチューニングを提供するかもしれないが、特定のAPIプロキシシステムほどきめ細かくはないだろう。
   - IngressコントローラをKubernetesのPodベースのワークロードとしてデプロイする場合、デプロイが高可用性と集約的なパフォーマンススループットのために設計されていることを確認すること。
     - メトリクスの観測性を利用してIngressを適切にスケールさせるが、ワークロードのスケール中にクライアントが中断しないよう、十分なクッションを入れる。
-- Network Security Policy 
-  - 
+- Network Security Policyについて
+  - NetworkPolicy APIは、ワークロードで定義されたネットワークレベルの入口と出口のアクセス制御を可能にする
+  - 書くpolicyのspecにはpodSelector、ingress、egress、およびpolicyTypeの各フィールドがある
+  - NetworkPolicyオブジェクトはnamespaceオブジェクトであるため、PodSelectorにselectorが与えられない場合、namespace内のすべてのpodがpolicyのスコープに該当する
+    - ingress/egressルールが定義されている場合、ポッドとの間で許可されるもののホワイトリストが作成される
+    - つまりingressフィールドを空にするとingressに対してdeny-all、egressフィールドを空にするとegressに対してdeny-all
+    - ポートリストとプロトコルリストもサポートされており、許可する通信の種類をさらに絞り込むことができる
+  - web, api(app), dbの3階層のネットワークポリシーの例
+    - Default deny rule:
 
+        ```yaml
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: default-deny-all
+        spec:
+          podSelector: {}
+          policyTypes:
+          - Ingress
+        ```
+
+    - Web layer network policy:
+
+      ```yaml
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: webaccess
+      spec:
+        podSelector:
+          matchLabels:
+            tier: "web"
+        policyTypes:
+        - Ingress
+        ingress:
+        - {} # なんでも許可
+      ```
+
+    - API layer network policy:
+
+      ```yaml
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-api-access
+      spec:
+        podSelector:
+          matchLabels:
+            tier: "api"
+        policyTypes:
+          - Ingress
+        ingress:
+          - from:
+            - podSelector:
+                matchLabels:
+                  tier: "web" # webからのみ許可
+      ```
+
+    - Database layer network policy:
+
+      ```yaml
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-db-access
+      spec:
+        podSelector:
+          matchLabels:
+            tier: "db"
+        policyTypes:
+        - Ingress
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels:
+                tier: "api"  # apiからのみ許可
+      ```
+
+- Network Policyのベストプラクティス
+  - 最初はポッドへのトラフィックのingressに焦点を当てる。
+    - ingressとegressのルールで問題を複雑にすると、ネットワークのトレースが悪夢のようになる。
+    - トラフィックが予想通りに流れるようになったら、機密性の高いワークロードへのフローをさらに制御するために、egressルールを検討し始めるとよい
+    - また、ingressルールリストに何も入力されていなくても、多くのオプションがデフォルトで設定されるため、ingressが有利です。
+  - 使用するネットワーク・プラグインが、NetworkPolicy API に対する何らかの独自のインタフェースを持つか、他のよく知られたプラグインをサポートしていることを確認する。
+    - プラグインの例としては、Calico、Cilium、Kube-router、Romana、Weave Netなどがある
+  - ネットワークチームが「デフォルトの拒否」ポリシーに慣れている場合、保護すべきワークロードを含むクラスタの各ネームスペースに対して、次のようなネットワークポリシーを作成する。
+
+    ```yaml
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: default-deny-all
+    spec:
+      podSelector: {}
+      policyTypes:
+      - Ingress
+    ```
+
+    - これにより、別のネットワーク・ポリシーが削除された場合でも、ポッドが誤って「公開」されることがなくなる。
+  - インターネットからアクセスする必要があるpodがある場合、ラベルを使用して、イングレスを許可するネットワーク・ポリシーを明示的に適用する。
+    - パケットの実際の送信元IPがインターネットではなく、ロードバランサーやファイアウォールなどのネットワークデバイスの内部IPである場合に備えて、フロー全体を意識する。
+    - たとえば、allow-internet=trueラベルを持つポッドに対して、すべての（外部を含む）ソースからのトラフィックを許可するには、次のようにする
+
+      ```yaml
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: internet-access
+      spec:
+        podSelector:
+          matchLabels:
+            allow-internet: "true"
+        policyTypes:
+        - Ingress
+        ingress:
+        - {}
+      ```
+  
+  - ルール自体はネームスペースに依存するため、ルールを作成しやすいように、アプリケーションのワークロードを単一のネームスペースに揃えるようにする。
+    - ネームスペースをまたぐ通信が必要な場合は、可能な限り明示し、特定のラベルを使用してフローパターンを識別できるようにする。
+
+    ```yaml
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: namespace-foo-2-namespace-bar
+      namespace: bar
+    spec:
+      podSelector:
+        matchLabels:
+          app: bar-app
+      policyTypes:
+      - Ingress
+      ingress:
+      - from:
+        - namespaceSelector:
+            matchLabels:
+              networking/namespace: foo
+          podSelector:
+            matchLabels:
+              app: foo-app
+    ```
+  
+  - 必要な正しいトラフィックパターンを調査する時間を確保するために、制限の少ないポリシーを持つテストベッドのnamespaceを用意します。
+- Service Meshについて
+  - 何千ものエンドポイント間でロードバランスをとり、互いに通信し、外部リソースにアクセスし、外部ソースからアクセスされる可能性のある何百ものサービスをホストする単一クラスターを想像するのは簡単だけど、サービス間の接続をすべて管理、保護、監視、追跡しようとすると、特にシステム全体から出入りするエンドポイントの動的な性質を考えると、かなり困難な作業となるよね。。
+  - 専用のデートプレーンとコントロールプレーンを使って、これらのサービスの接続方法とセキュリティの確保を制御できるようにする
+  - サービスメッシュは以下を提供する
+    - メッシュ全体に分散されたきめ細かいトラフィック・シェーピング・ポリシーによるトラフィックのロードバランシング
+    - メッシュのメンバーであるサービス（クラスタ内または別のクラスタ内のサービス、またはメッシュのメンバーである外部システムを含む）のサービス・ディスカバリー
+    - OpenTracing標準に準拠したJaegerやZipkinのようなトレースシステムを使った分散サービス全体のトレースを含む、トラフィックとサービスの観測性
+    - 相互認証によるメッシュ内のトラフィックのセキュリティ。場合によっては、ポッド間や東西のトラフィックだけでなく、南北のセキュリティと制御を提供するIngressコントローラも提供される
+    - サーキットブレーカー、リトライ、デッドラインなどのパターンを可能にする回復力、健全性、および障害防止機能
+  - これらの機能はすべて、メッシュに参加するアプリケーションに統合されており、アプリケーションをほとんど、あるいはまったく変更する必要がない
+  - Service Mesh Interface（SMI）として基本的な機能セットの標準的なインターフェースが用意される（CRIとかCNI, CSI, CPIとかと並ぶ位置付け）
+- Service Meshのベストプラクティス
+  - サービスメッシュが提供する主要な機能の重要性を評価し、最も重要な機能を最小限のオーバーヘッドで提供する現在のサービスを決定する。
+    - ここでいうオーバーヘッドとは、人間の技術的負債とインフラの資源的負債の両方を指す。
+    - 本当に必要なのは特定のポッド間の相互 TLS だけなら、それをプラグインに統合して提供する CNI を見つけるのは簡単。
+  - マルチクラウドやハイブリッドシナリオのようなクロスシステムメッシュの必要性は重要な要件か。
+    - すべてのサービスメッシュがこの機能を提供しているわけではないし、提供していたとしても、複雑なプロセスで環境に脆弱性をもたらすことがよくあります。
+  - サービスメッシュの多くはオープンソースのコミュニティベースのプロジェクトであり、環境を管理するチームがサービスメッシュに慣れていない場合は、商業的にサポートされているサービスの方が良い選択肢となる場合がある。
+    - Istioをベースにした商用サポートおよびマネージド・サービスメッシュを提供し始めている企業もあり、Istioが管理が複雑なシステムであることはほぼ共通認識となっているため、これは有用である。
 
 ## Chapter 10. Pod and Container Security
 
+- PodSecurityPolicyを効果的に実装することは驚くほど難しく、多くの場合、オフにされるか、他の方法で回避される。
+  - しかし、PodSecurityPolicyを完全に理解するために時間をかけることはとてもおすすめ。
+  - これは、クラスタ上で実行できるものと特権のレベルを制限することによって、攻撃対象領域を減らすための唯一で最も効果的な手段。
+- PodSecurityPolicyの有効化
+  - PodSecurityPolicyリソースに定義された条件を実施するために，対応するアドミッション・コントローラを有効にする必要がある
+    - ただし、パブリッククラウドプロバイダーやクラスタ運用ツールの間で広く利用されているわけではない
+    - PodSecurityPolicyを有効にする際は、最初に十分な準備をしないとワークロードがブロックされる可能性があるため、慎重に進める必要がある。
+  - PodSecurityPolicyが有効化されていることの確認方法
+    - PodSecurityPolicy APIが有効になっていることを確認する
+      - `kubectl get psp`
+    - `api-server flag --enable-admission-plugins` で PodSecurityPolicy アドミッション・コントローラを有効にする
+  - ワークロードが稼働している既存のクラスタでPodSecurityPolicyを有効にする場合、必要なすべてのポリシー、サービスアカウント、ロール、およびロールバインディングを作成してから、アドミッションコントローラを有効にする必要がある
+- PodSecurityの構造
+  - 特権的なワークロードを許可する設定の例
+
+    ```yaml
+    apiVersion: policy/v1beta1
+    kind: PodSecurityPolicy
+    metadata:
+      name: privileged
+    spec:
+      privileged: true
+      allowPrivilegeEscalation: true
+      allowedCapabilities:
+        - '*'
+      volumes:
+        - '*'
+      hostNetwork: true
+      hostPorts:
+        - min: 0
+          max: 65535
+      hostIPC: true
+      hostPID: true
+      runAsUser:
+        rule: 'RunAsAny'
+      seLinux:
+        rule: 'RunAsAny'
+      supplementalGroups:
+        rule: 'RunAsAny'
+      fsGroup:
+        rule: 'RunAsAny'
+    ```
+
+  - 制限付きアクセスの例
+
+    ```yaml
+    apiVersion: policy/v1beta1
+    kind: PodSecurityPolicy
+    metadata:
+      name: restricted
+    spec:
+      privileged: false
+      allowPrivilegeEscalation: false
+      requiredDropCapabilities:
+        - ALL
+      volumes:
+        - 'configMap'
+        - 'emptyDir'
+        - 'projected'
+        - 'secret'
+        - 'downwardAPI'
+        - 'persistentVolumeClaim'
+      hostNetwork: false
+      hostIPC: false
+      hostPID: false
+      runAsUser:
+        rule: 'RunAsAny'
+      seLinux:
+        rule: 'RunAsAny'
+      supplementalGroups:
+        rule: 'MustRunAs'
+        ranges:
+          - min: 1
+            max: 65535
+      fsGroup:
+        rule: 'MustRunAs'
+        ranges:
+          - min: 1
+            max: 65535
+      readOnlyRootFilesystem: false
+    ```
+  
+  - RBACにより、これらのポリシーを使用するためのアクセス権をサービスアカウントに付与する必要がある
+
+    ```yaml
+    kind: ClusterRole
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: psp-restricted
+    rules:
+    - apiGroups:
+      - extensions
+      resources:
+      - podsecuritypolicies
+      resourceNames:
+      - restricted
+      - privileged
+      verbs:
+      - use
+    
+    ---
+
+    kind: ClusterRoleBinding
+    apiVersion: rbac.authorization.k8s.io/v1
+    metadata:
+      name: psp-restricted
+    subjects:
+    - kind: Group
+      name: system:serviceaccounts
+      namespace: kube-system
+    roleRef:
+      kind: ClusterRole
+      name: psp-restricted
+      apiGroup: rbac.authorization.k8s.io
+    ```
+
+- PodSecurityPolicyを進めるために
+  - 合理的なデフォルトのポリシーの準備
+    - PodSecurityPolicyの本当の力は、クラスタ管理者および/またはユーザーが、ワークロードが一定のセキュリティレベルを満たすことを保証できるようにすること
+    - 実際には、多くのワークロードがルートとして実行され、hostPathボリュームを使用し、または他の危険な設定を持っているため、ワークロードを起動して実行するためだけにセキュリティホールのあるポリシーを作成しなければならないことを、しばしば見過ごすことがある
+  - 膨大な労力
+    - PodSecurityPolicyが有効になっていないKubernetes上ですでに稼働しているワークロードが多数ある場合、ポリシーを正しく作成することは大きな投資が必要
+  - 開発者はPodSecurityPolicyを学ぶことに興味があるか？
+    - 開発者はPodSecurityPolicyを学びたいと思うか？
+    - そうするためのインセンティブは何？
+    - PodSecurityPolicyを有効にするために、前もって多くの調整と自動化を行わなければ、PodSecurityPolicyは全く採用されない可能性が非常に高い
+  - デバッグが面倒
+    - ポリシー評価のトラブルシューティングが難しい(IAMみたいなものか。。)
+      - 例えば、ワークロードが特定のポリシーにマッチした、あるいはマッチしなかった理由を理解したいと思うかもしれない
+      - それを容易にするツールやログは、現段階では存在しない
+  - 自分のコントロール外のアーティファクトに頼ってないか？
+    - Docker Hubや他のパブリックリポジトリからイメージを引っ張ってきないか？
+    - それらは何らかの形であなたのポリシーに違反している可能性があり、あなたのコントロールの及ばないところで修正することになる
+    - もう1つの一般的な場所は、Helmチャート
+      - 適切なポリシーが適用された状態で出荷されているか？
+- PodSecurityPolicyのベストプラクティス
+  - すべてはRBACに帰結する
+    - PodSecurityPolicyはRBACによって決定される。
+    - この関係によって、現在のRBACポリシー設計のすべての欠点が実際に露呈される。
+    - RBACとPodSecurityPolicyの作成と保守を自動化することがどれほど重要であるか、私たちは強調することができない。
+    - 特に、サービスアカウントへのアクセスをロックダウンすることは、ポリシーを使用する上で重要なポイント
+  - ポリシーの範囲を理解する。
+    - クラスタ上でどのようにポリシーを配置するかを決定することは、非常に重要。
+    - ポリシーは、クラスタ全体、名前空間、またはワークロードに特化したスコープにすることができる。
+    - Kubernetesクラスタ運用の一部であるクラスタには、より寛容なセキュリティ特権を必要とするワークロードが常に存在するため、寛容なポリシーを使用して不要なワークロードを阻止するために適切なRBACがあることを確認する。
+  - 既存のクラスターでPodSecurityPolicyを有効にしたいか？
+    - [この便利なオープンソースツール](https://github.com/sysdiglabs/kube-psp-advisor)を使用して、現在のリソースに基づいてポリシーを生成するといい。
+    - そこから、ポリシーに磨きをかけることができる。
+    - PodSecurityPolicyはクラスタを安全に保つことを支援する非常に強力なAPIだが、使用するには高い税金を要求される。
+    - 慎重な計画と実用的なアプローチで、PodSecurityPolicyはどんなクラスタにもうまく実装できる。少なくとも、セキュリティチームを満足させることができるはず。
+- ワークロードの分離とRuntimeClass
+  - コンテナランタイムは、まだ大部分が安全でないワークロード分離の境界と考えられている
+  - 現在最も一般的なランタイムが安全であると認められるようになるかどうか、明確な道筋はない
+  - 異なるワークロード分離を提供するこれらのコンテナランタイムの導入により、ユーザーは同じクラスタ内で分離保証に基づいて多くの異なるランタイムを選択することができる
+    - たとえば、同じクラスタ内で信頼できるワークロードと信頼できないワークロードを、異なるコンテナランタイムで実行させることができる
+  - RuntimeClassは、コンテナランタイムの選択を可能にするAPIとしてKubernetesに導入された
+    - PodのspecでRuntimeClassNameを使用することで、ワークロードに対して特定のRuntimeClassを定義することができる
+
+      ```yaml
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: nginx
+      spec:
+        runtimeClassName: firecracker
+      ```
+
+- ランタイムの実装
+  - CRI containerd
+    - シンプルさ、堅牢性、移植性に重点を置いたコンテナランタイムの API ファサード。
+  - cri-o
+    - Open Container Initiative (OCI) をベースとした、Kubernetes 用の軽量なコンテナランタイムの専用実装
+  - Firecracker
+    - KVM（Kernel-based Virtual Machine）上に構築された仮想化技術で、非仮想化環境において、従来のVMのセキュリティと分離性を備えたマイクロVMを非常に高速に起動することができる
+  - gVisor
+    - OCI互換のサンドボックス型ランタイム。新しいユーザースペースカーネルでコンテナを実行し、低オーバーヘッドで安全かつ分離されたコンテナランタイムを提供する。
+  - Kata Containers
+    - コンテナのように感じられ、動作する軽量なVMを実行することにより、VMのようなセキュリティと分離を提供する、安全なコンテナランタイムを構築しているコミュニティ。
+- ワークロードの分離とRuntimeClassのベストプラクティス
+  - RuntimeClassを使用して異なるワークロード分離環境を実装すると、運用環境が複雑になる。
+    - つまり、提供する分離の性質上、異なるコンテナランタイム間でワークロードがポータブルでない可能性がある。
+    - 異なるランタイム間でサポートされる機能のマトリックスを理解することは複雑であり、ユーザーエクスペリエンスの低下を招く。
+    - 可能であれば、混乱を避けるために、それぞれ単一のランタイムを持つ別々のクラスターを持つことをお勧めする
+  - ワークロードの分離は、安全なマルチテナンシーを意味しない。
+    - セキュアなコンテナランタイムを実装したとしても、KubernetesクラスタとAPIが同じようにセキュアになったとは限らない。
+    - Kubernetesの端から端までの総表面積を考慮する必要がる。
+    - 分離されたワークロードがあるからといって、それがKubernetes API経由で悪意ある行為者によって変更されないとは限らない。
+  - 異なるランタイム間のツールは一貫性がない。
+    - デバッグやイントロスペクションのために、コンテナランタイムのツールに依存しているユーザーがいるかもしれない。
+    - 異なるランタイムを持つということは、実行中のコンテナを一覧表示するために docker ps を実行できなくなる可能性がある。(dockerdはk8s1.24から非推奨になったよね)
+    - これは、トラブルシューティングの際に混乱と複雑化を招きます。
+- その他のPodおよびコンテナセキュリティ
+  - アドミッション・コントローラ
+    - PodSecurityPolicyで深みにはまることを心配している場合、ほんの一部の機能を提供する
+      - DenyExecOnPrivilegedやDenyEscalatingExecなどのアドミッション・コントローラをアドミッションWebhookと組み合わせて使用し、SecurityContextワークロード設定を追加して、同様の結果を達成することが可能
+      - アドミッションコントロールの詳細については、第17章を参照。
+  - 侵入・異常検知ツール
+    - コンテナランタイム内でポリシーをイントロスペクトして実施したい場合はどうすればよいか。
+    - これを実現するオープンソースツールが存在する。これらのツールは、Linuxシステムコールをリッスンしてフィルタリングするか、Berkeley Packet Filter（BPF）を利用することで動作する。
+      - そのようなツールの1つがFalco。
+      - FalcoはCloud Native Computing Foundation (CNCF)のプロジェクトで、Demonsetとしてインストールするだけで、実行中にポリシーを設定し、実施することができるようになる。
+      - Falcoは一つのアプローチに過ぎない。この分野のツールに目を通し、何が自分に合っているかを確認することをお勧めする。
 
 ## Chapter 11. Policy and Governance for Your Cluster
+
+- ポリシーとガバナンスが重要な理由
+  - ヘルスケアや金融サービスなど、高度に規制された環境で事業を展開している場合でも、単にクラスタ上で実行されているものを確実に管理したい場合でも、企業で定められたポリシーを実施する方法が必要になる。
+  - これらのポリシーが定義された後（組織で）、ポリシーを実装し、これらのポリシーに準拠したクラスタを維持する方法を決定する必要がある。
+  - これらのポリシーは、規制コンプライアンスを満たすため、または単にベストプラクティスを実施するために設けられるかもしれません。どのような理由であれ、これらのポリシーを実装する際には、開発者の俊敏性とセルフサービスを犠牲にしないことを確認する必要がある
+- ここでいうポリシーとは？
+  - Kubernetesでは、ポリシーはどこにでもある。
+    - NetworkPolicyであれ、PodSecurityPolicyであれ、私たちは皆、ポリシーとは何か、いつそれを使うべきかを理解するようになった。
+      - 私たちは、Kubernetesのリソースspecで宣言されたものが、ポリシー定義通りに実装されることを信頼している。
+      - NetworkPolicyもPodSecurityPolicyも、実行時に実装されるもの。
+    - しかし、このKubernetesリソース仕様で実際に定義されている内容は、誰が管理しているのか。
+      - それは、ポリシーとガバナンスの仕事。
+      - 実行時にポリシーを実装するのではなく、ガバナンスの文脈でポリシーといえば、Kubernetesリソース仕様のフィールドや値そのものを制御するpolicyを定義することを意味する。
+      - これらのポリシーに対して準拠したKubernetesリソース仕様のみが許可され、クラスタステートにコミットされる。
+- Cloud-Native Policy Engine
+  - どのリソースが準拠するのかを判断できるようにするためには、さまざまなニーズに柔軟に対応できるポリシーエンジンが必要。
+  - Open Policy Agent（OPA）は、オープンソースの柔軟かつ軽量なポリシーエンジンで、クラウドネイティブのエコシステムで人気が高まっている。
+  - Gatekeeperが人気
+- Gatekeeperの導入
+  - Gatekeeperは、クラスターのポリシーとガバナンスのための、オープンソースのカスタマイズ可能なKubernetesのアドミッションウェブフックである。
+  - Gatekeeperは、OPA制約フレームワークを活用し、カスタムリソース定義（CRD）ベースのポリシーを適用する。
+  - CRDを使用することで、ポリシーのオーサリングと実装を切り離した統合的なKubernetesエクスペリエンスを実現する。
+  - ポリシーのテンプレートは制約テンプレートと呼ばれ、クラスタ間で共有・再利用が可能。
+  - Gatekeeperは、リソースの検証や監査機能を実現する。
+  - Gatekeeperの素晴らしい点は、ポータブルであること
+    - どのKubernetesクラスタでも実装できる
+    - すでにOPAを使用している場合は、そのポリシーをGatekeeperに移植できるかもしれない。
+  - 例えばこんなPolicyを定義できる
+    - サービスはインターネット上で一般に公開してはならない。
+    - 信頼できるコンテナレジストリからのコンテナのみを許可する。
+    - すべてのコンテナには、リソース制限が必要。
+    - イングレスのホスト名は重複してはならない。
+    - イングレスは HTTPS のみを使用する。
+  - Gatekeeperの用語について
+    - Gatekeeperは、OPAと同じ用語を多く採用している。そのため、Gatekeeperの動作を理解するためには、この用語がどのようなものであるかを知るが重要である。
+      - Constraint
+        - Constraintが定義されている場合、効果的に「これを許可しない」と表明していることになる→つまり、デフォルトは暗黙の許可
+        - Kubernetesのリソース仕様は常に変化するため、このアーキテクチャ上の決定はKubernetesのリソース仕様にうまく適合している（whitelistだったらバージョンアップで死）
+      - Rego
+        - RegoはOPAネイティブのクエリ言語
+      - Constraint Template
+        - ポリシーのテンプレートと考えて差し支えない
+        - 型付けされたパラメータと、再利用のためにパラメータ化された対象のRegoで構成される
+    - 実際の例については省略
+- 監査
+  - すでにリソースがデプロイされているクラスタで、何が定義されたポリシーに準拠しているかを知りたい場合、どのように対処すればよいか
+  - 監査機能を使用すると、Gatekeeperは定期的にリソースを定義された制約に照らして評価できる
+  - ポリシーに従って設定されていないリソースを検出し、修正することができる
+  - 監査結果は制約のステータスフィールドに格納されるため、`kubectl`を使用するだけで簡単に見つけることができる
+- Gatekeeperを使いこなすために
+  - Gatekeeperのリポジトリには、銀行のコンプライアンスに対応したポリシーを構築するための詳細な例を説明する素晴らしいデモコンテンツが同梱されている。
+  - これをみながらやると良い
+- Gatekeeper Next Steps(この中ですでに解決されているものもあるかも。2年前の本なので)
+  - Mutation (ポリシーに基づいたリソースの変更。例えば、このようなラベルを追加する)  
+  - 外部データソース（LDAPやActive Directoryとの統合によるポリシー検索）
+  - 認可（Kubernetesの認可モジュールとしてGatekeeperを使用する。）  
+  - ドライラン（クラスタでアクティブにする前に、ユーザがポリシーをテストできるようにする）
+- ポリシーとガバナンスのベストプラクティス
+  - Podの特定のフィールドを強制したい場合、どのKubernetesリソース仕様を検査し、強制したいかを決定する必要がある。
+    - 例えば、Deploymentsの場合
+      - DeploymentsはReplicaSetsを管理し、ReplicaSetsはPodを管理する
+      - 3つのレベルすべてで実施することもできるが、この場合はポッドであるものが最良の選択。（のようにみえる）
+      - しかし非準拠のポッドをデプロイしようとしたときのユーザーフレンドリーなエラーメッセージは表示されなくなる。
+      - これは、ユーザーが非準拠のリソースを作成しているのではなく、ReplicaSetが作成しているため。
+      - この経験から、ユーザーはDeploymentに関連付けられた現在のReplicaSetに対してkubectl describeを実行することで、そのリソースが準拠していないことを判断する必要がある。
+      - これは面倒に思える かもしれないが、ポッドセキュリティポリシーなど、他のKubernetesの機能と一貫した動作となっている。
+  - Kubernetesリソースには、kind、namespace、labelSelectorという基準で制約をかけることができる。
+    - 制約を適用したいリソースに対して、できるだけタイトにスコープを設定することを強くお勧めする。
+    - クラスタ上のリソースが大きくなっても一貫したポリシー動作が保証され、評価する必要のないリソースがOPAに渡されない
+  - KubernetesのSecretなど、潜在的にセンシティブなデータに対して同期やエンフォースメントを行うことは推奨されない
+    - OPAがこれをキャッシュに保持し（そのデータを複製するように設定されている場合）、リソースがGatekeeperに渡されることを考えると。。。
+  - 多くの制約を定義している場合、制約の拒否はリクエスト全体の拒否を意味する。これを論理的なORとして機能させる方法はない。
 
 ## Chapter 12. Managing Multiple Clusters
 
