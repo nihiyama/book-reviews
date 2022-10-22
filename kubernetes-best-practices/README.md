@@ -1873,11 +1873,278 @@
   - Kubernetesの上にプラットフォームを構築する場合、そのプラットフォームのユーザーとそのニーズがどのように進化していくかを慎重に考える
     - シンプルで使いやすくすることは明らかに良い目標ですが、これが、プラットフォームの外側をすべて書き換えないと成功できないような、窮屈なユーザーを生み出すことになれば、最終的にはフラストレーションのたまる（そして成功しない）体験となる
 
-
 ## Chapter 16. Managing State and Stateful Applications
 
+- コンテナオーケストレーションの初期は対象となるワークロードはステートレスアプリケーションだったが、最近はステートフルなアプリケーションも必要性を増している
+- ボリュームとボリューム・マウント
+  - 状態を維持する方法を必要とするすべてのワークロードが、複雑なデータベースや高スループットのデータ・キュー・サービスである必要はない
+  - 多くの場合、コンテナ型ワークロードに移行するアプリケーションは、特定のディレクトリが存在し、それらのディレクトリに対して適切な情報を読み書きすることを期待する
+  - このセクションでは、書き込み可能で、コンテナ障害や、さらに良いことにポッド障害にも耐えられるボリュームをコンテナに与えることに焦点を当てる
+  - Docker、rkt、CRI-O、そしてSingularityなどの主要なコンテナランタイムでは、外部ストレージシステムにマッピングされたボリュームをコンテナにマウントすることが可能。
+    - 最も単純に言えば、外部ストレージはメモリロケーション、コンテナのホスト上のパス、あるいはNFS、Glusterfs、CIFS、Cephなどの外部ファイルシステムになる
+    - レガシーアプリケーションで、アプリケーション固有の情報をローカルファイルシステムに記録するように書かれているような場合に便利。
+      - アプリケーションコードを更新して、サイドカーコンテナの標準出力または標準エラー出力にログアウトし、共有ポッドボリュームを介して外部ソースにログデータをストリームする
+      - あるいはホストログとコンテナアプリケーションログの両方のボリュームを読み込めるホストベースのログツールを使用する
+  - 以下に示すように、Kubernetes hostPathマウントを使用してコンテナ内のボリュームマウントを使用することで達成できる
+
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+    name: nginx-webserver
+    spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: nginx-webserver
+    template:
+      metadata:
+        labels:
+          app: nginx-webserver
+      spec:
+        containers:
+          - name: nginx-webserver
+            image: nginx:alpine
+            ports:
+              - containerPort: 80
+            volumeMounts:
+              - name: hostvol
+                mountPath: /usr/share/nginx/html
+        volumes:
+          - name: hostvol
+            hostPath:
+              path: /home/webcontent
+    ```
+
+    - ボリュームのベストプラクティス
+      - ボリュームの使用は、データを共有する必要がある複数のコンテナを必要とするポッド（たとえば、アダプタまたはアンバサダー型のパターン）に限定するようにする。このようなタイプの共有パターンには、emptyDirを使用する。
+      - ノードベースのエージェントやサービスからデータにアクセスする必要がある場合は、hostDir を使用する
+      - 重要なアプリケーションログやイベントをローカルディスクに書き込むサービスを特定し、可能であればそれらをstdoutまたはstderrに変更し、ボリュームマップを活用する代わりに、真のKubernetes認識ログ集約システムにログをストリームさせるようにする
+- Kubernetesストレージ
+  - 本当の鍵は、ボリュームマウントをバックアップするストレージをKubernetesで管理できるようにすること
+    - これにより、Podが必要に応じて生きたり死んだりするような、よりダイナミックなシナリオが可能になり、Podをバックアップするストレージは、Podがどこに住んでいてもそれに応じて移行するようにな
+    - Kubernetesは、PersistentVolumeとPersistentVolumeClaimという2つの異なるAPIを使用して、Podのストレージを管理する
+  - PersistentVolume
+    - PersistentVolumeは、Podにマウントされているすべてのボリュームをバックアップするディスクと考える
+    - Kubernetesは、動的または静的に定義されたボリュームのいずれかを使用できる。動的に作成されたボリュームを使用できるようにするには、KubernetesにStorageClassが定義されている必要がある
+    - PersistentVolumeは様々なタイプとクラスでクラスタ内に作成でき、PersistentVolumeClaimがPersistentVolumeと一致した場合にのみ、実際にポッドに割り当てられる
+    - ボリューム自体は、ボリューム・プラグインによってバックアップされる
+    - Kubernetesで直接サポートされているプラグインは多数あり、それぞれ調整すべき設定パラメータが異なる
+
+    ```yaml
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: pv001
+      labels:
+        tier: "silver"
+      spec:
+        capacity:
+          storage: 5Gi
+        accessModes:
+          - ReadWriteMany
+        persistentVolumeReclaimPolicy: Recycle
+        storageClassName: nfs
+        mountOptions:
+          - hard
+          - nfsvers=4.1
+        nfs:
+          path: /tmp
+          server: 172.17.0.2
+    ```
+
+  - PersistentVolumeClaims
+    - PersistentVolumeClaimsは、KubernetesにPodが使用するストレージのリソース要求定義を与える方法
+    - Podはクレームを参照し、クレーム要求にマッチするpersistentVolumeが存在すれば、そのボリュームをその特定のPodに割り当てる
+    - 最低限、ストレージ要求のサイズとアクセスモードが定義されている必要があるが、特定のStorageClassを定義することも可能
+    - また、セレクタを使用して、特定の条件を満たす特定のPersistentVolumeが割り当てられるように一致させることもできる
+
+    ```yaml
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+    name: my-pvc
+    spec:
+      storageClass: nfs
+      accessModes:
+        - ReadWriteMany
+      resources:
+        requests:
+          storage: 5Gi
+      selector:
+        matchLabels:
+        tier: "silver"
+    ```
+
+    - KubernetesはPersistentVolumeとclaimをマッチングし、それらをバインドする
+    - このボリュームを使うには、pod.specは以下のようにクレームを名前で参照すればよい。
+
+    ```yaml
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: nginx-webserver
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: nginx-webserver
+      template:
+        metadata:
+          labels:
+            app: nginx-webserver
+        spec:
+          containers:
+            - name: nginx-webserver
+              image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: hostvol
+              mountPath: /usr/share/nginx/html
+          volumes:
+            - name: hostvol
+              persistentVolumeClaim:
+                claimName: my-pvc
+    ```
+
+  - Storage Classes
+    - 管理者は、事前に手動でPersistentVolumeを定義する代わりに、使用するボリュームプラグインと、そのクラスのすべてのPersistentVolumeが使用する特定のマウントオプションとパラメータを定義したStorageClassオブジェクトを作成することを選択することができる。
+    - これにより、使用する特定のStorageClassでクレームを定義することができ、KubernetesはStorageClassパラメータとオプションに基づいて動的にPersistentVolumeを作成する
+
+    ```yaml
+    kind: StorageClass
+    apiVersion: storage.k8s.io/v1
+    metadata:
+      name: nfs
+    provisioner: cluster.local/nfs-client-provisioner
+    parameters:
+      archiveOnDelete: True
+    ```
+
+    - Kubernetesでは、オペレーターがDefaultStorageClassアドミッションプラグインを使用して、デフォルトのストレージクラスを作成することも可能
+    - APIサーバーでこれが有効になっている場合、デフォルトのStorageClassを定義することができ、StorageClassを明示的に定義しないPersistentVolumeClaimsがある
+    - クラウドプロバイダによっては、インスタンスで許可された最も安価なストレージにマッピングするために、デフォルトのストレージクラスが含まれている場合がある（大体アドオンを使うことになる）
+
+    - コンテナ・ストレージ・インターフェース(CSI)とFlexVolume
+      - 従来はFlexVolumeインターフェイスが使われてきたけど、CSIが標準になった
+      - CSIの目的はストレージベンダー（SP）がプラグインを一度開発すれば、複数のコンテナオーケストレーション（CO）システムで動作するようにする業界標準のコンテナストレージインターフェイスを定義すること
+  - Kubernetesストレージのベストプラクティス
+    - クラウドネイティブアプリケーションの設計原則は、可能な限りステートレスアプリケーションの設計を強制しようとする
+      - しかし、コンテナベースのサービスのフットプリントの増加により、データストレージの永続化の必要性が生じている
+    - 可能であれば、DefaultStorageClassのアドミッションプラグインを有効にして、デフォルトのストレージクラスを定義する。
+      - PersistentVolumesを必要とするアプリケーションのHelmチャートは、多くの場合、チャートのデフォルトストレージクラスをデフォルトとしており、アプリケーションをあまり修正することなくインストールすることができます。（Rookとかもそう）
+    - オンプレミスまたはクラウドプロバイダーでクラスターのアーキテクチャを設計する場合、ノードとPersistentVolumesの両方に適切なラベルを使用して、計算層とデータ層の間のゾーンと接続性を考慮し、データとワークロードをできるだけ近くに保つためにアフィニティーを使用する。
+      - ゾーンAのノード上のポッドが、ゾーンBのノードに接続されたボリュームをマウントしようとするのは、最も避けたいこと。（性能と障害ポイント）
+    - どのワークロードがディスク上で状態を維持する必要があるか、慎重に検討する
+      - データベースシステムのような外部サービスや、クラウドプロバイダで実行する場合は、現在使用されているAPIと一貫性のあるホスティングサービス、例えばmongoDBやmySQL as a serviceで処理できるか？
+    - よりステートレスになるようにアプリケーションのコードを修正するのに、どれだけの労力がかかるかを判断する
+    - Kubernetesはワークロードのスケジュールに合わせてボリュームを追跡してマウントするが、それらのボリュームに保存されるデータの冗長性とバックアップはまだ扱えない
+      - CSI仕様では、ストレージバックエンドがサポートできる場合、ベンダーがネイティブスナップショットテクノロジーをプラグインするためのAPIが追加されている
+    - ボリュームが保持するデータの適切なライフサイクルを検証する
+      - デフォルトでは、動的プロビジョニングされたpersistentVolumeの再生ポリシーが設定されており、Podが削除されると、バックストレージ・プロバイダーからボリュームが削除される
+      - 機密性の高いデータやフォレンジック分析に使用できるデータは、reclaimするように設定する必要がある
+- ステートフル・アプリケーシ
+  - まず、典型的なReplicaSetがどのようにPodをスケジュールおよび管理するか、そしてそれぞれが従来のステートフルアプリケーションにとってどのように有害になり得るかを理解する必要がある
+    - ReplicaSetのPodは、スケジュールされるとスケールアウトされ、ランダムな名前が割り当てらる。
+    - ReplicaSetのPodは、任意の方法でスケールダウンされる。 ReplicaSet内のPodは、名前またはIPアドレスを通じて直接呼び出されることはなく、Serviceとの関連付けを通じて呼び出される
+    - ReplicaSet内のPodはいつでも再起動し、別のノードに移動することができる
+    - PersistentVolumeがマッピングされたReplicaSet内のPodは、クレームによってのみリンクされるが、新しい名前を持つ新しいPodは、再スケジュールされたときに必要に応じてクレームを引き継ぐことができる
+  - クラスタ・データ管理システムについて簡単な知識しかない人でも、ReplicaSetベースのポッドのこのような特性についてすぐに問題を理解することができる。
+    - データベースの書き込み可能なコピーを持つポッドが突然削除されることを想像してみると。。。
+    - データベースシステムがリーダーエレクションプロセスを必要とすること、セットのメンバー間のデータレプリケーションを処理できること、できないこと、あるいはそれどころか、それがデータベースシステムであることを全く知らない。そこで、ステートフルセットの出番となる
+  - StatefulSets
+    - StatefulSetが行うのは、より信頼性の高いノード/ポッドの動作を期待するアプリケーション・システムの実行を容易にすること
+    - ReplicaSetの典型的なPodの特性のリストを見てみると、StatefulSetsはほとんど正反対のものを提供している
+      - StatefulSet内のPodは、逆の順序でスケールダウンされる
+      - StatefulSet内のPodは、ヘッドレス・サービスの背後で名前により個別にアドレス指定することができる
+      - ボリューム・マウントを必要とするStatefulSet内のPodは、定義されたPersistentVolumeテンプレートを使用する必要がある。StatefulSetのPodが要求するボリュームは、StatefulSetが削除されても削除されない。
+    - StatefulSet の仕様は、Service宣言とPersistentVolumeテンプレート以外はDeploymentと非常によく似ている。最初にヘッドレスServiceを作成する必要があり、これはPodが個別に対応するServiceを定義するものである。ヘッドレスServiceは、通常のServiceと同じだが、通常のロードバランシングは行わない。
+
+    ```yaml
+    apiVersion: v1
+    kind: Service
+    metadata:
+    name: mongo
+    labels:
+      name: mongo
+    spec:
+      ports:
+      - port: 27017
+        targetPort: 27017
+      clusterIP: None #This creates the headless Service
+      selector:
+        role: mongo
+    ```
+
+    ```yaml
+    apiVersion: apps/v1beta1
+    kind: StatefulSet
+    metadata:
+      name: mongo
+    spec:
+      serviceName: "mongo"
+      replicas: 3
+      template:
+        metadata:
+          labels:
+            role: mongo
+            environment: test
+        spec:
+          terminationGracePeriodSeconds: 10
+          containers:
+            - name: mongo
+              image: mongo:3.4
+              command:
+                - mongod
+                - "--replSet"
+                - rs0
+                - "--bind_ip"
+                - 0.0.0.0
+                - "--smallfiles"
+                - "--noprealloc"
+              ports:
+                - containerPort: 27017
+              volumeMounts:
+                - name: mongo-persistent-storage
+                  mountPath: /data/db
+            - name: mongo-sidecar
+              image: cvallance/mongo-k8s-sidecar
+              env:
+                - name: MONGO_SIDECAR_POD_LABELS
+                  value: "role=mongo,environment=test"
+      volumeClaimTemplates:
+        - metadata:
+          name: mongo-persistent-storage
+          annotations:
+            volume.beta.kubernetes.io/storage-class: "fast"
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            resources:
+              requests:
+                storage: 2Gi
+    ```
+
+  - Operators
+    - StatefulSetの現実的な問題はKubernetesはStatefulSetで実行されているワークロードを本当に理解していないこと。バックアップ、フェイルオーバー、リーダー登録、新規レプリカ登録、アップグレードなど、その他の複雑なオペレーションはすべて、かなり定期的に行われる必要があるオペレーションで、StatefulSetとして実行する場合は、ある程度慎重に検討する必要がある。→Operatorを使おう
+    - Operatorはステートフルなアプリケーションのためだけでなく、カスタムコントローラロジックのため、複雑なデータサービスやステートフルなシステムにも間違いなく適応する
+    - 複雑な分散システムをKubernetesで運用する際の運用知識を取り入れたいと考える世界中の多くのデータ管理システムベンダー、クラウドプロバイダ、SREの間で徐々に足場を固めつつある（この本は2020年出版）
+    - [OperatorHub](https://operatorhub.io/)では、キュレーションされたOperatorの最新リストを見ることができます
+
+  - StatefulSetとOperatorのベストプラクティス
+    - 通常、ステートフルなアプリケーションは、オーケストレーターがまだうまく管理できない、
+      - より深い管理を必要とするため、ステートフルセットを使用する決定は、慎重に行う必要がある
+    - StatefulSetのヘッドレスServiceは自動的に作成されず、個々のノードとしてのPodを適切にアドレス指定するために、デプロイ時に作成する必要がある
+    - アプリケーションが序数命名と信頼できるスケーリングを必要とする場合、それが常にPersistentVolumesの割り当てを必要とするとは限らない
+    - クラスタのノードが応答しなくなった場合、StatefulSetの一部であるPodは自動的に削除されず、猶予期間後に TerminatingまたはUnkown状態になる
+      - このポッドを消去する唯一の方法は、クラスタからノード・オブジェクトを削除するか、kubeletが再び動作してポッドを直接削除するか、またはOperatorがポッドを強制的に削除すること
+      - 強制削除は最後のオプションであり、削除されたポッドを持つノードがオンラインに戻らないように十分に注意する必要がある。`kubectl delete pod nginx-0 --grace-period=0 --force` でPodを強制削除することができる。
+    - 強制削除してもポッドがUnknownのままになっている場合があるので、APIサーバーにパッチを当てるとエントリーが削除され、StatefulSetコントローラーが削除したポッドの新しいインスタンスを作成する。`kubectl patch pod nginx-0 -p '{"metadata":{"finalizers":null}}'`
+    - 何らかのリーダー選出やデータレプリケーションの確認処理を伴う複雑なデータシステムを運用している場合は、グレースフル・シャットダウン処理を用いてポッドを削除する前に、preStopフックを用いてあらゆる接続を適切に閉じ、リーダー選出を強制し、データ同期を確認する
+    - ステートフル・データを必要とするアプリケーションが複雑なデータ管理システムである場合、アプリケーションのより複雑なライフサイクル・コンポーネントの管理を支援するOperatorが存在するかどうかを確認する価値があるかもしれない。
+      - アプリケーションが社内で構築されている場合、アプリケーションに管理性を追加するために、アプリケーションをOperatorとしてパッケージ化することが有用であるかどうかを調査する価値があるかもしれない。
+      - 例として、[CoreOS Operator SDK](https://sdk.operatorframework.io/)をみてみよう
 
 ## Chapter 17. Admission Control and Authorization
-
 
 ## Chapter 18. Conclusion
