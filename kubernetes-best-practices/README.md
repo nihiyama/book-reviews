@@ -2147,4 +2147,257 @@
 
 ## Chapter 17. Admission Control and Authorization
 
+- Kubernetes APIへのアクセスを制御することは、クラスタのセキュリティを確保するだけでなく、Kubernetesクラスタのすべてのユーザー、ワークロード、およびコンポーネントに対してポリシーとガバナンスを付与する手段として使用できるようにするための鍵となる
+- オブジェクトが受け入れられた場合、ストレージに保存されるまでの、Kubernetes APIサーバーを介したエンドツーエンドのリクエストフローは以下のとおり
+
+![api request flow](./images/api-request-flow.drawio.svg)
+
+- アドミッション・コントロール
+  - アドミッション・コントローラによって実現されること
+    - 存在しないnamespaceにリソースを定義するとき、namespaceの自動作成
+    - デフォルトのストレージクラスの選択
+  - アドミッションコントローラーとは
+    - アドミッションコントローラーはKubernetes APIサーバーのリクエストフローのパスに位置し、認証と認可のフェーズに続いてリクエストを受け取る
+    - これらは、リクエストオブジェクトをストレージに保存する前に、検証または変更（またはその両方）のいずれかに使用される。検証型と変更型のアドミッション・コントローラの違いは、変更型は承認したリクエスト・オブジェクトを変更できるのに対し、検証型はできないこと
+  - なぜアドミッションコントローラーが重要なのか
+    - アドミッションコントローラはすべてのAPIサーバのリクエストの経路に存在するため、 さまざまな方法で使用することができる。最も一般的には、アドミッションコントローラの使い方は以下の3つのグループに分類される。
+    - ポリシーとガバナンス
+      - アドミッションコントローラーを使用してポリシーを強制することができる
+      - ポッド内のすべてのコンテナには、リソース制限が必要
+      - 既存のツールで発見できるように、すべてのリソースに定義済みの標準ラベルまたはアノテーションを追加する
+      - すべてのIngressリソースは、HTTPSのみを使用する
+    - セキュリティ
+      - アドミッション・コントローラを使用して、クラスタ全体で一貫したセキュリティ姿勢を強制することできる
+      - たとえば、特権コンテナやホストファイルシステムからの特定のパスの使用を拒否するなど、Pod仕様のセキュリティセンシティブなフィールドに対する制御を可能にする
+      - アドミッションWebhooksを使用すると、より詳細なセキュリティルールやカスタムセキュリティルールを適用することができる
+    - リソース管理
+      - すべてのイングレスの完全修飾ドメイン名 (FQDN) が特定のサフィックスに含まれることを確認する
+      - イングレスのFQDNが重複しないようにする
+      - ポッド内のすべてのコンテナにリソース制限があることを強制する
+  - アドミッションコントローラーの種類
+    - アドミッション・コントローラには、標準と動的の2つのクラスがある
+    - 標準アドミッションコントローラは、APIサーバーにコンパイルされ、各Kubernetesリリースでプラグインとして提供されており、APIサーバーの起動時に設定する必要がある
+    - 一方、動的コントローラは実行時に設定可能で、Kubernetesのコアコードベース外で開発されている
+    - 動的なアドミッション制御の種類は、HTTPコールバックでアドミッション要求を受け取るアドミッションWebhooksのみKubernetesには30以上のアドミッション・コントローラが同梱されており、これらはKubernetes APIサーバーの以下のフラグで有効になる
+
+      ```sh
+      --enable-admission-plugins 
+      ```
+
+    - Kubernetesに同梱される機能の多くは、特定の標準的なアドミッション・コントローラの有効化に依存しており、そのため、推奨されるデフォルトのセットが存在する
+
+      ```sh
+      --enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,DefaultStorageClass,DefaultTolerationSeconds,MutatingAdmissionWebhook,ValidatingAdmissionWebhook,Priority,ResourceQuota,PodSecurityPolicy
+      ```
+
+    - Kubernetesのアドミッション・コントローラの一覧とその機能については、Kubernetesのドキュメントに記載されている
+    - これらの標準的なアドミッション・コントローラは、それ自身はアドミッション・ロジックを実装せず、むしろ、アドミッション・リクエスト・オブジェクトを転送するためにクラスタ内で動作するWebhookエンドポイントを設定するために使用される
+  - アドミッションWebhooksの設定
+    - アドミッションWebhookの主な利点の1つは、動的に設定可能であること
+    - 一貫性と失敗モード(failuerPolicyのこと？)に関して言えば、意味合いとトレードオフがあるので、アドミッション Webhook を効果的に設定する方法を理解することは重要
+
+      ```yaml
+      apiVersion: admissionregistration.k8s.io/v1beta1
+      kind: ValidatingWebhookConfiguration
+      metadata:
+        name: ## リソース名
+      webhooks:
+        - name: ## アドミッションWebhook名 (アドミッションレビューが拒否されたときにユーザーに表示される)
+          clientConfig:
+            service:
+              namespace: ## admission Webhook Podが存在するネームスペース
+              name: ## アドミッションに接続するために使用されるサービス名。
+              webhook
+            path: ## webhook URL
+            caBundle: ## Webhookのサーバー証明書を検証するために使用される、PEMエンコードされたCAバンドル
+          rules: ## APIサーバーがどのリソース/サブリソースに対するどのような操作をこのWebhookに送信しなければならないかを記述
+            - operations: ## APIサーバーがこのWebhookに送信するトリガーとなる特定の操作(例：create, update, delete, connect)
+              apiGroups:
+                - ""
+              apiVersions:
+                - "*"
+              resources:
+                - ## 名前による特定のリソース (e.g., deployments, services, ingresses)
+          failurePolicy: ## アクセス問題や認識できないエラーの処理方法を定義し、Ignore またはFailにする必要がある。
+      ```
+
+      ```yaml
+      apiVersion: admissionregistration.k8s.io/v1beta1
+      kind: MutatingWebhookConfiguration
+      metadata:
+        name: ## リソース名
+      webhooks:
+        - name: ## アドミッションWebhook名 (アドミッションレビューが拒否されたときにユーザーに表示される)
+          clientConfig:
+            service:
+              namespace: ## admission Webhook Podが存在するネームスペース
+              name: ## アドミッションに接続するために使用されるサービス名。
+                webhook
+            path: ## webhook URL
+            caBundle: ## Webhookのサーバー証明書を検証するために使用される、PEMエンコードされたCAバンドル
+          rules: ## APIサーバーがどのリソース/サブリソースに対するどのような操作をこのWebhookに送信しなければならないかを記述
+            - operations: ## APIサーバーがこのWebhookに送信するトリガーとなる特定の操作(例：create, update, delete, connect)
+              apiGroups:
+                - ""
+              apiVersions:
+                - "*"
+              resources:
+                - ## 名前による特定のリソース (e.g., deployments, services, ingresses)
+          failurePolicy: ## アクセス問題や認識できないエラーの処理方法を定義し、Ignore またはFailにする必要がある。
+      ```
+
+    - yamlの記述としてvalidateもmutateも`kind`フィールドを除いて同じであるが、バックエンドに1つの違いがある
+      - MutatingWebhookConfigurationはadmission Webhookが変更されたリクエストオブジェクトを返すことを許可するが、ValidatingWebhookConfigurationはそうではない。
+      - それでも、MutatingWebhookConfigurationを定義し、単に検証を行うことは許容される。セキュリティの考慮事項があり、最小特権規則に従うことを検討すべきです。
+  - アドミッションコントロールのベストプラクティス
+    - アドミッションプラグインの順序は重要ではない（昔は処理順序に固有で重要だったらしい？）
+      - しかし、アドミッションのWebhooksに関しては、順序は小さな役割を果たすので、この場合のリクエストフローを理解することは重要
+      - リクエストの承認または拒否は論理ANDで動作する
+      - つまり、いずれかの承認Webhookがリクエストを拒否した場合、リクエスト全体が拒否され、エラーがユーザーに送り返される
+      - 変更型アドミッション・コントローラは、常に検証型アドミッション・コントローラの前に実行されることにも注意が必要
+    - 同じフィールドを変更させないこと
+      - 複数の変更型admission webhookを設定することも課題となっている
+      - 複数の変更型admission webhookを経由するリクエスト・フローを順序付ける方法がないため、予期しない結果になる可能性があるため、変更型admissionが同じフィールドを変更しないようにすることが重要。
+      - 複数の変更型admission webhookがある場合、変更型Webhookに続いて実行されることが保証されているため、最終的なリソースマニフェストが変更後に期待するものであることを確認するために、検証型admission Webhookを構成することを一般にお勧めする
+    - fail open/fail closeを考える
+      - failurePolicyフィールドがmutatingと validatingの両方のwebhook構成リソースの一部である
+      - このフィールドは、admission Webhookにアクセス上の問題があったり、認識できないエラーが発生したりした場合に、APIサーバがどのように処理を進めるべきかを定義する
+      - このフィールドは、IgnoreまたはFailのいずれかに設定することができる
+      - Ignoreは基本的にオープンに失敗し、リクエストの処理は続行されることを意味し、一方 Fail はリクエスト全体を拒否することを意味する
+      - これは明白に思えるかもしれませんが、どちらの場合もその意味は考慮する必要がある。
+      - 重要な許可Webhookを無視すると、ユーザーが知らないうちに、ビジネスが依存しているポリシーがリソースに適用されないという結果になりかない。
+      - これを防ぐための一つの解決策は、APIサーバーが与えられたadmission webhookに到達できないことを記録したときに警告を発することである。
+      - もしadmission webhookが問題を起こしている場合、すべてのリクエストを拒否することで、さらに破壊的な失敗をすることができる。
+      - これを防ぐために、特定のリソース・リクエストだけが admission webhook に設定されるように、ルールをスコープすることができる
+      - クラスタ内のすべてのリソースに適用されるルールは、決して作ってはいけない
+    - もし独自のadmission webhookを書いたなら、admission webhookが決定を下して応答するまでの時間によって、ユーザー/システム リクエストが直接影響を受ける可能性があることを覚えておくことが重要である
+      - すべての admission webhook呼び出しには30秒のタイムアウトが設定されており、この時間を過ぎるとfailurePolicyが有効になる。
+      - たとえ、admission webhook が承認/拒否の判断を下すのに数秒かかったとしても、クラスタを操作する際のユーザーエクスペリエンスに重大な影響を与える可能性がある
+      - 複雑なロジックや、データベースなどの外部システムに依存してadmit/denyロジックを処理することは避ける
+    - admission Webhooksのスコープオプションのフィールドがあり、NamespaceSelectorフィールドを介して、入場許可 webhooksが操作するネームスペースをスコープすることができまる
+      - このフィールドのデフォルトは空で、すべてにマッチするが、matchLabelsフィールドを使用してnamespaceのラベルにマッチさせることができる
+      - このフィールドを使用すると、namespaceごとに明示的に参加させることができるため、常にこのフィールドを使用することをお勧めする
+    - kube-system名前空間は、すべてのKubernetesクラスタに共通する予約された名前空間です。ここでは、すべてのシステムレベルのサービスが動作します。このネームスペースのリソースに対してアドミッションのWebhookを特に実行しないことを推奨しており、NamespaceSelectorフィールドを使用して、単にkube-systemネームスペースにマッチしないことでこれを実現できます。また、クラスタ運用に必要なシステムレベルの名前空間についても考慮する必要があります。
+    - RBACでアドミッションのWebhook設定をロックダウンする。
+      - MutatingWebhookConfigurationとValidatingWebhookConfigurationの両方の作成は、クラスタのルートレベルの操作であり、RBACを使用して適切にロックダウンする必要がある。
+      - これを怠ると、クラスタが壊れたり、最悪の場合、アプリケーションのワークロードにインジェクション攻撃を受けたりすることになる。
+    - 機密データを送信しないこと
+      - Admission Webhooksは基本的にブラックボックスで、AdmissionRequestsを受け取り、AdmissionResponsesを出力する
+      - どのようにリクエストを保存し、どのように操作するかは、ユーザーには不透明
+      - Admission Webhookにどのようなリクエストペイロードを送信するかを考えることが重要
+      - KubernetesのSecretやConfigMapの場合、機密情報が含まれている可能性があり、その情報がどのように保存され共有されるかについて強い保証を必要とする
+      - これらのリソースをAdmission Webhookで共有すると、機密情報が漏れる可能性がある
+      - そのため、リソース規則を、検証および/または変異に必要な最小限のリソースにスコープする必要がある。
+
+- 認可
+  - Kubernetesでは、各リクエストの認可は認証の後、アドミッションの前に実行される
+  - 認可モジュール
+    - 認可モジュールは、アクセスの許可を与えるか拒否するかを担当する。
+    - 明示的に定義する必要があるポリシーに基づいてアクセスを許可するかどうかを決定し、そうでない場合はすべてのリクエストを暗黙的に拒否する
+    - バージョン1.15現在、Kubernetesには以下の認証モジュールが同梱されてい
+    - 属性ベースのアクセス制御 (Attribute-Based Access Control: ABAC)
+      - ローカルファイル経由で認可ポリシーを設定可能
+    - RBAC
+      - Kubernetes API経由で認可ポリシーを設定可能
+    - Webhook
+      - リモートRESTエンドポイントを介してリクエストの認可を処理できるようにする
+    - Node
+      kubeletからのリクエストを認可する特殊な認可モジュール
+    - モジュールの設定は、クラスタ管理者がAPIサーバ上で以下のフラグを介して行う
+
+      ```sh
+      --authorization-mode
+      ```
+
+    - 複数のモジュールを設定することができ、順番にチェックされる
+    - アドミッションコントローラーとは異なり、ひとつの認証モジュールがリクエストを許可すれば、リクエストは続行できる
+    - すべてのモジュールがリクエストを拒否した場合のみ、ユーザーにエラーが返される
+    - ABAC
+      - 以下は、ユーザーMaryにkube-system名前空間内のポッドへの読み取り専用アクセスを許可している
+
+        ```yaml
+        apiVersion: abac.authorization.kubernetes.io/v1beta1
+        kind: Policy
+        spec:
+          user: mary
+          resource: pods
+          readonly: true
+          namespace: kube-system
+        ```
+
+      - Maryが以下の要求を行った場合、Maryはdemo-app名前空間内のPodを取得するアクセス権を持っていないため、拒否される
+
+      ```yaml
+      apiVersion: authorization.k8s.io/v1beta1
+      kind: SubjectAccessReview
+      spec:
+        resourceAttributes:
+          verb: get
+          resource: pods
+          namespace: demo-app
+      ```
+
+      - authorization.k8s.ioのAPI群は、APIサーバーの認可を外部サービスに公開するもので、デバッグに最適な以下のAPIを備えている
+        - SelfSubjectAccessReview: 現在のユーザーに対するアクセスレビュー
+        - SubjectAccessReview: SelfSubjectAccessReviewと同様、任意のユーザーを対象としたアクセスレビュー
+        - LocalSubjectAccessReview: SubjectAccessReviewと同様だが、ネームスペースに依存する
+        - SelfSubjectRulesReview: 指定されたネームスペースでユーザが実行できるアクションのリストを返す
+      - SelfSubjectAcessReviewを使った例について見てみる
+
+        ```sh
+        cat << EOF | kubectl create -f - -o yaml
+        apiVersion: authorization.k8s.io/v1beta1
+        kind: SelfSubjectAccessReview
+        spec:
+          resourceAttributes:
+            verb: get
+            resource: pods
+            namespace: demo-app
+        EOF
+        ```
+
+        ```yaml
+        apiVersion: authorization.k8s.io/v1beta1
+        kind: SelfSubjectAccessReview
+        metadata:
+          creationTimestamp: null
+        spec:
+          resourceAttributes:
+            namespace: kube-system
+            resource: pods
+            verb: get
+        status:
+          allowed: true
+        ```
+
+      - 実際には、上記を実施しなくても`kubectl auth can-i`を使って確認できる
+
+        ```sh
+        kubectl auth can-i get pods --namespace demo-app
+        yes
+        ```
+
+      - 管理者認証があれば、同じコマンドを実行して別のユーザーとしてアクションを確認することもできる
+
+        ```sh
+        kubectl auth can-i get pods --namespace demo-app --as mary
+        yes
+        ```
+
+    - RBAC
+      - Kubernetesのロールベースのアクセス制御については、第4章にてのべてある。
+    - Webhook
+      - webhook認証モジュールを使用すると、クラスタ管理者は認証プロセスを委ねる外部RESTエンドポイントを設定することができる。
+      - これはクラスタ外で実行され、URL 経由で到達可能。
+      - REST エンドポイントの設定はマスターファイルシステム上のファイルにあり、API サーバー上では`--authorization-webhook-config-file=SOME_FILENAME`で設定する。
+      - 設定後、APIサーバーはリクエストボディの一部としてSubjectAccessReviewオブジェクトを認可Webhookアプリケーションに送信し、認可Webhookアプリケーションはオブジェクトを処理してステータスフィールドcompleteを付けて返す
+  - 認可のベストプラクティス
+    - ABACポリシーは各マスターノードのファイルシステム上に配置し、同期を取る必要があるため、一般的にマルチマスタークラスターでABACを使用しないことを推奨する
+      - Webhookモジュールについても、ファイルと対応するフラグが存在することに基づいて設定されるため、同じことが言える
+      - さらに、ファイル内のこれらのポリシーを変更すると、APIサーバーの再起動が必要になるため、シングルマスタークラスターでは事実上コントロールプレーンが停止し、マルチマスタークラスターでは構成に一貫性がなくなると言える。
+      - これらの詳細を考慮すると、ルールはKubernetes自体に設定され保存されるため、ユーザー承認にはRBACモジュールのみを使用することをお勧めする
+    - Webhookモジュールは、強力だが、潜在的に非常に危険
+      - すべてのリクエストが認可プロセスの対象となることを考えると、Webhookサービスに障害が発生すると、クラスタにとって壊滅的な打撃となる
+      - したがって、Webhookサービスが到達できない、あるいは利用できない場合のクラスタの障害モードについて完全に検証し、問題がなければ、一般に外部認証モジュールを使用しないことを推奨する。
+
 ## Chapter 18. Conclusion
